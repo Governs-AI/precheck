@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     api_key_header: str = "X-Governs-Key"
     demo_api_key: str = "GAI_LOCAL_DEV_ABC"
     
+    # Webhook configuration
+    next_webhook_url: Optional[str] = None
+    precheck_dlq: str = "/tmp/precheck.dlq.jsonl"
+    
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
