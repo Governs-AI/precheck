@@ -17,7 +17,7 @@ async def health():
         "version": "0.0.1"
     }
 
-@router.post("/u/{user_id}/v1/precheck", response_model=PrecheckRes)
+@router.post("/v1/u/{user_id}/precheck", response_model=PrecheckRes)
 async def precheck(
     user_id: str,
     body: PrecheckReq,
@@ -37,7 +37,7 @@ async def precheck(
     
     return PrecheckRes(**res)
 
-@router.post("/u/{user_id}/v1/postcheck", response_model=PrecheckRes)
+@router.post("/v1/u/{user_id}/postcheck", response_model=PrecheckRes)
 async def postcheck(
     user_id: str,
     body: PrecheckReq,

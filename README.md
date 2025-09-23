@@ -54,7 +54,7 @@ Returns service status and version information.
 
 ### Precheck
 ```http
-POST /u/{user_id}/v1/precheck
+POST /v1/u/{user_id}/precheck
 X-Governs-Key: your-api-key
 Content-Type: application/json
 
@@ -86,7 +86,7 @@ Content-Type: application/json
 
 ### Postcheck
 ```http
-POST /u/{user_id}/v1/postcheck
+POST /v1/u/{user_id}/postcheck
 ```
 
 Similar to precheck but for post-execution validation.

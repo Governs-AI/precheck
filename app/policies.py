@@ -185,7 +185,8 @@ def anonymize_text_regex(text: str) -> Tuple[str, List[str]]:
 def is_password_field(field_name: str) -> bool:
     """Check if field name indicates a password field"""
     password_fields = {"password", "pass", "pwd", "secret", "key", "token", "auth"}
-    return field_name.lower() in password_fields
+    field_lower = field_name.lower()
+    return field_lower in password_fields or any(field in field_lower for field in password_fields)
 
 def is_false_positive(entity_type: str, field_name: str, value: str) -> bool:
     """Check if a PII detection is likely a false positive based on field context"""
