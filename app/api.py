@@ -12,7 +12,6 @@ import httpx
 
 router = APIRouter()
 
-# Webhook configuration
 WEBHOOK_URL = os.getenv("NEXT_WEBHOOK_URL", "")
 DLQ_PATH = os.getenv("PRECHECK_DLQ", "/tmp/precheck.dlq.jsonl")
 
