@@ -355,7 +355,7 @@ NET_TOOLS_PREFIX = ("web.", "http.", "fetch.", "request.")
 # Load tool access policy on module import
 load_tool_access_policy()
 
-def evaluate(tool: str, scope: Optional[str], payload: Dict, now: int) -> Dict:
+def evaluate(tool: str, scope: Optional[str], payload: Dict, now: int, direction: str = "ingress") -> Dict:
     """Evaluate policy and return decision with optional payload transformation"""
     
     # 1) Hard deny for dangerous tools
@@ -367,8 +367,8 @@ def evaluate(tool: str, scope: Optional[str], payload: Dict, now: int) -> Dict:
             "ts": now
         }
     
-    # 2) Check for tool-specific access rules (ingress only)
-    if tool in TOOL_ACCESS and TOOL_ACCESS[tool].get("direction") == "ingress":
+    # 2) Check for tool-specific access rules (ingress or egress)
+    if tool in TOOL_ACCESS and TOOL_ACCESS[tool].get("direction") == direction:
         # Run PII detection to get findings
         findings = []
         if USE_PRESIDIO and ANALYZER is not None:

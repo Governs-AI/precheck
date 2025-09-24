@@ -103,6 +103,16 @@ tool_access:
     direction: ingress
     allow_pii:
       PII:email_address: pass_through
+  data_export:
+    direction: egress          # only apply on postcheck
+    allow_pii:
+      PII:email_address: pass_through  # allow email in export
+      PII:us_ssn: tokenize        # tokenize SSN in export
+  audit_log:
+    direction: egress          # only apply on postcheck
+    allow_pii:
+      PII:email_address: pass_through  # allow email in audit logs
+      # SSN will be redacted (default behavior)
 # default: everything else redacts/denies (your current behavior)
 ```
 
@@ -115,7 +125,7 @@ tool_access:
 ### Policy Directions
 
 - **`ingress`**: Apply only on precheck (before tool execution)
-- **`egress`**: Apply only on postcheck (after tool execution) - *Future feature*
+- **`egress`**: Apply only on postcheck (after tool execution)
 
 ## PII Detection
 
@@ -366,16 +376,82 @@ curl -X POST http://localhost:8080/v1/u/u1/precheck \
 }
 ```
 
+#### Test 3: data_export tool (egress)
+```bash
+curl -X POST http://localhost:8080/v1/u/u1/postcheck \
+  -H "X-Governs-Key: GAI_LOCAL_DEV_ABC" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tool": "data_export",
+    "scope": "net.external",
+    "payload": {
+      "email": "alice@example.com",
+      "ssn": "123456789"
+    },
+    "corr_id": "req-125"
+  }'
+```
+
+**Expected Response**:
+```json
+{
+  "decision": "transform",
+  "payload_out": {
+    "email": "alice@example.com",
+    "ssn": "pii_a70ae1e6"
+  },
+  "reasons": [
+    "pii.allowed:PII:email_address",
+    "pii.tokenized:PII:us_ssn"
+  ],
+  "policy_id": "tool-access",
+  "ts": 1758748082
+}
+```
+
+#### Test 4: audit_log tool (egress)
+```bash
+curl -X POST http://localhost:8080/v1/u/u1/postcheck \
+  -H "X-Governs-Key: GAI_LOCAL_DEV_ABC" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tool": "audit_log",
+    "scope": "net.external",
+    "payload": {
+      "email": "alice@example.com",
+      "ssn": "123456789"
+    },
+    "corr_id": "req-126"
+  }'
+```
+
+**Expected Response**:
+```json
+{
+  "decision": "transform",
+  "payload_out": {
+    "email": "alice@example.com",
+    "ssn": "<USER_SSN>"
+  },
+  "reasons": [
+    "pii.allowed:PII:email_address",
+    "pii.redacted:PII:us_ssn"
+  ],
+  "policy_id": "tool-access",
+  "ts": 1758748185
+}
+```
+
 ## Future Enhancements
 
 ### Planned Features
 
-1. **Egress Policies**: Support for postcheck (egress) tool access rules
-2. **Policy Hot-reload**: Reload policies without service restart
-3. **Advanced Transformations**: Support for `mask`, `hash`, `remove` actions
-4. **Policy Versioning**: Support for multiple policy versions
-5. **Audit Logging**: Comprehensive audit trail for policy decisions
-6. **Policy Templates**: Reusable policy templates for common patterns
+1. **Policy Hot-reload**: Reload policies without service restart
+2. **Advanced Transformations**: Support for `mask`, `hash`, `remove` actions
+3. **Policy Versioning**: Support for multiple policy versions
+4. **Audit Logging**: Comprehensive audit trail for policy decisions
+5. **Policy Templates**: Reusable policy templates for common patterns
+6. **Bidirectional Policies**: Tools that need different rules for ingress vs egress
 
 ### Integration Opportunities
 

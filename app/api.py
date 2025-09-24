@@ -61,7 +61,7 @@ async def precheck(
     
     start_time = time.time()
     now = int(start_time)
-    res = evaluate(body.tool, body.scope, body.payload, now)
+    res = evaluate(body.tool, body.scope, body.payload, now, direction="ingress")
     
     # Emit webhook event (fire-and-forget)
     if WEBHOOK_URL:
@@ -99,7 +99,7 @@ async def postcheck(
     
     start_time = time.time()
     now = int(start_time)
-    res = evaluate(body.tool, body.scope, body.payload, now)
+    res = evaluate(body.tool, body.scope, body.payload, now, direction="egress")
     
     # Emit webhook event (fire-and-forget)
     if WEBHOOK_URL:

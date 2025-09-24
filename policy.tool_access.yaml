@@ -9,4 +9,14 @@ tool_access:
     direction: ingress
     allow_pii:
       PII:email_address: pass_through
+  data_export:
+    direction: egress          # only apply on postcheck
+    allow_pii:
+      PII:email_address: pass_through  # allow email in export
+      PII:us_ssn: tokenize        # tokenize SSN in export
+  audit_log:
+    direction: egress          # only apply on postcheck
+    allow_pii:
+      PII:email_address: pass_through  # allow email in audit logs
+      # SSN will be redacted (default behavior)
 # default: everything else redacts/denies (your current behavior)
