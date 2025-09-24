@@ -1,6 +1,9 @@
 import re
 import time
 import hashlib
+import yaml
+import os
+from copy import deepcopy
 from typing import Tuple, Any, Dict, List, Set, Optional
 from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
 from presidio_anonymizer import AnonymizerEngine
@@ -196,13 +199,12 @@ def is_false_positive(entity_type: str, field_name: str, value: str) -> bool:
     if entity_type == "US_SSN" and is_password_field(field_name):
         return True
     
-    # Common false positive patterns
+    # Common false positive patterns - be more conservative
     if entity_type == "US_SSN" and len(value) == 9 and value.isdigit():
-        # Check if it looks like a simple password (repeated digits, sequential, etc.)
-        if value == value[0] * len(value):  # All same digit
+        # Only filter out obvious non-SSN patterns
+        if value == value[0] * len(value):  # All same digit (e.g., "111111111")
             return True
-        if value in ["123456789", "987654321"]:  # Sequential
-            return True
+        # Don't filter out sequential numbers as they could be real SSNs
     
     return False
 
@@ -246,10 +248,112 @@ def redact_obj(obj: Any, reasons: Optional[Set[str]] = None, field_name: str = "
     
     return obj, reasons
 
+# Tool access policy configuration
+TOOL_ACCESS = None
+TOKEN_SALT = os.getenv("PII_TOKEN_SALT", "default-salt-change-in-production")
+
+def load_tool_access_policy():
+    """Load tool access policy from YAML file"""
+    global TOOL_ACCESS
+    try:
+        policy_path = os.path.join(os.path.dirname(__file__), "..", "policy.tool_access.yaml")
+        if os.path.exists(policy_path):
+            with open(policy_path, 'r') as f:
+                data = yaml.safe_load(f)
+                TOOL_ACCESS = data.get("tool_access", {})
+        else:
+            TOOL_ACCESS = {}
+    except Exception as e:
+        print(f"Failed to load tool access policy: {e}")
+        TOOL_ACCESS = {}
+
+def tokenize(value: str) -> str:
+    """Create a stable token for PII values"""
+    return f"pii_{hashlib.sha256((TOKEN_SALT + value).encode()).hexdigest()[:8]}"
+
+def get_jsonpath(obj: Any, path: str) -> Any:
+    """Get value from object using JSONPath-like syntax"""
+    if not path.startswith("$."):
+        return None
+    
+    parts = path[2:].split(".")
+    current = obj
+    
+    for part in parts:
+        if isinstance(current, dict) and part in current:
+            current = current[part]
+        else:
+            return None
+    
+    return current
+
+def set_jsonpath(obj: Any, path: str, value: Any) -> None:
+    """Set value in object using JSONPath-like syntax"""
+    if not path.startswith("$."):
+        return
+    
+    parts = path[2:].split(".")
+    current = obj
+    
+    # Navigate to the parent of the target
+    for part in parts[:-1]:
+        if isinstance(current, dict):
+            if part not in current:
+                current[part] = {}
+            current = current[part]
+        else:
+            return
+    
+    # Set the final value
+    if isinstance(current, dict):
+        current[parts[-1]] = value
+
+def apply_tool_access(tool_name: str, findings: List[Dict], payload_dict: Dict) -> Tuple[Dict, List[str]]:
+    """Apply tool-specific PII access rules"""
+    cfg = TOOL_ACCESS.get(tool_name, {})
+    allow_map = cfg.get("allow_pii", {})
+    
+    transformed = deepcopy(payload_dict)
+    reasons = []
+    
+    for f in findings:
+        pii_cls = f.get("type", "")  # e.g., "PII:email"
+        path = f.get("path", "")     # e.g., "$.payload.email"
+        action = allow_map.get(pii_cls)
+        
+        if action == "pass_through":
+            reasons.append(f"pii.allowed:{pii_cls}")
+            continue
+        elif action == "tokenize":
+            original_value = get_jsonpath(payload_dict, path)
+            if original_value is not None:
+                tokenized_value = tokenize(str(original_value))
+                set_jsonpath(transformed, path, tokenized_value)
+                reasons.append(f"pii.tokenized:{pii_cls}")
+        else:
+            # Fall back to default redaction (mask/remove)
+            original_value = get_jsonpath(payload_dict, path)
+            if original_value is not None:
+                # Use existing redaction logic
+                if isinstance(original_value, str):
+                    if USE_PRESIDIO and ANALYZER is not None:
+                        redacted, _ = anonymize_text_presidio(original_value, "")
+                    else:
+                        redacted, _ = anonymize_text_regex(original_value)
+                    set_jsonpath(transformed, path, redacted)
+                else:
+                    set_jsonpath(transformed, path, "<REDACTED>")
+                reasons.append(f"pii.redacted:{pii_cls}")
+    
+    return transformed, reasons
+
 # Policy configuration
 DENY_TOOLS = {"python.exec", "bash.exec", "code.exec", "shell.exec"}
 NET_SCOPES = ("net.",)
 NET_TOOLS_PREFIX = ("web.", "http.", "fetch.", "request.")
+
+# Load tool access policy on module import
+load_tool_access_policy()
 
 def evaluate(tool: str, scope: Optional[str], payload: Dict, now: int) -> Dict:
     """Evaluate policy and return decision with optional payload transformation"""
@@ -263,22 +367,60 @@ def evaluate(tool: str, scope: Optional[str], payload: Dict, now: int) -> Dict:
             "ts": now
         }
     
-    # 2) Redact for network scopes/tools
+    # 2) Check for tool-specific access rules (ingress only)
+    if tool in TOOL_ACCESS and TOOL_ACCESS[tool].get("direction") == "ingress":
+        # Run PII detection to get findings
+        findings = []
+        if USE_PRESIDIO and ANALYZER is not None:
+            # Analyze each field in the payload
+            for key, value in payload.items():
+                if isinstance(value, str):
+                    results = ANALYZER.analyze(text=value, entities=list(ANONYMIZE_OPERATORS.keys()), language="en")
+                    for r in results:
+                        if not is_false_positive(r.entity_type, key, value):
+                            findings.append({
+                                "type": f"PII:{r.entity_type.lower()}",
+                                "path": f"$.{key}",
+                                "start": r.start,
+                                "end": r.end,
+                                "score": r.score
+                            })
+        
+        # Apply tool-specific transformations
+        if findings:
+            transformed_payload, tool_reasons = apply_tool_access(tool, findings, payload)
+            return {
+                "decision": "transform",
+                "payload_out": transformed_payload,
+                "reasons": tool_reasons,
+                "policy_id": "tool-access",
+                "ts": now
+            }
+        else:
+            # No PII found, pass through
+            return {
+                "decision": "allow",
+                "payload_out": payload,
+                "policy_id": "tool-access",
+                "ts": now
+            }
+    
+    # 3) Redact for network scopes/tools (existing behavior)
     if (scope or "").startswith(NET_SCOPES) or tool.startswith(NET_TOOLS_PREFIX):
         new_payload, reasons = redact_obj(payload)
         reasons = sorted(list(reasons))
         return {
             "decision": "transform",
-            "payload": new_payload,
+            "payload_out": new_payload,
             "reasons": reasons or None,
             "policy_id": "net-redact-presidio" if USE_PRESIDIO else "net-redact-regex",
             "ts": now
         }
     
-    # 3) Allow by default
+    # 4) Allow by default
     return {
         "decision": "allow",
-        "payload": payload,
+        "payload_out": payload,
         "policy_id": "none",
         "ts": now
     }

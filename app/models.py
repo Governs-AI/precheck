@@ -11,6 +11,7 @@ class PrecheckReq(BaseModel):
 class PrecheckRes(BaseModel):
     decision: str  # allow | deny | transform
     payload: Optional[Dict[str, Any]] = None
+    payload_out: Optional[Dict[str, Any]] = None  # sanitized payload to forward to LLM/tool
     reasons: Optional[List[str]] = None
     policy_id: Optional[str] = None
     ts: int

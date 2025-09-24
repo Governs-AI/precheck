@@ -1,0 +1,12 @@
+version: v1
+tool_access:
+  verify_identity:
+    direction: ingress         # only apply on precheck
+    allow_pii:
+      PII:email_address: pass_through  # tool may receive raw email
+      PII:us_ssn: tokenize        # tool must get token, not raw
+  send_marketing_email:
+    direction: ingress
+    allow_pii:
+      PII:email_address: pass_through
+# default: everything else redacts/denies (your current behavior)
