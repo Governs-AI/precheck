@@ -64,6 +64,53 @@ All API responses include a `policy_id` field that indicates which precedence le
 
 ## API Endpoints
 
+### Health Check
+```
+GET /v1/health
+```
+
+**Response**:
+```json
+{
+  "ok": true,
+  "service": "governsai-precheck",
+  "version": "0.0.1"
+}
+```
+
+### Readiness Check
+```
+GET /v1/ready
+```
+
+**Purpose**: Comprehensive readiness check for Kubernetes probes and service validation
+
+**Response**:
+```json
+{
+  "ready": true,
+  "service": "governsai-precheck",
+  "version": "0.0.1",
+  "checks": {
+    "presidio": {"status": "ok", "message": "..."},
+    "policy": {"status": "ok", "message": "..."},
+    "policy_file": {"status": "ok", "message": "..."},
+    "environment": {"status": "ok", "message": "..."},
+    "dlq": {"status": "ok", "message": "..."}
+  },
+  "timestamp": 1758812000
+}
+```
+
+### Prometheus Metrics
+```
+GET /metrics
+```
+
+**Purpose**: Prometheus metrics endpoint for monitoring and alerting
+
+**Response**: Prometheus text format with counters, histograms, and gauges
+
 ### Precheck Endpoint
 ```
 POST /v1/u/{user_id}/precheck
@@ -176,6 +223,40 @@ GET /v1/ready
 - `"warning"`: Check passed with warnings
 - `"error"`: Check failed, service not ready
 - `"disabled"`: Check not applicable (e.g., Presidio disabled)
+
+### Prometheus Metrics
+```
+GET /metrics
+```
+
+**Purpose**: Prometheus metrics endpoint for monitoring and alerting
+
+**Response**: Prometheus text format with counters, histograms, and gauges
+
+**Key Metrics**:
+
+#### Counters
+- `precheck_requests_total{user_id, tool, decision, policy_id}` - Total precheck requests
+- `postcheck_requests_total{user_id, tool, decision, policy_id}` - Total postcheck requests  
+- `pii_detections_total{pii_type, action}` - Total PII detections
+- `policy_evaluations_total{tool, direction, policy_id}` - Total policy evaluations
+- `webhook_events_total{event_type, status}` - Total webhook events emitted
+- `dlq_events_total{error_type}` - Total DLQ events
+
+#### Histograms
+- `precheck_duration_seconds{user_id, tool}` - Precheck request duration
+- `postcheck_duration_seconds{user_id, tool}` - Postcheck request duration
+- `policy_evaluation_duration_seconds{tool, policy_id}` - Policy evaluation duration
+- `pii_detection_duration_seconds{pii_type}` - PII detection duration
+- `webhook_duration_seconds{status}` - Webhook request duration
+
+#### Gauges
+- `active_requests{endpoint}` - Number of active requests
+- `policy_cache_size` - Number of policies in cache
+- `dlq_size` - Number of events in DLQ
+
+#### Info
+- `precheck_service_info{version, build_date, git_commit}` - Service information
 
 ## Event Schema
 

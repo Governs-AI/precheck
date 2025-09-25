@@ -1,10 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Response
 from .models import PrePostCheckRequest, DecisionResponse
 from .auth import require_api_key
 from .policies import evaluate
 from .rate_limit import rate_limiter
 from .events import emit_event
 from .log import audit_log
+from .metrics import (
+    get_metrics, get_metrics_content_type, set_service_info,
+    record_precheck_request, record_postcheck_request, record_policy_evaluation,
+    set_active_requests
+)
 import time
 import asyncio
 
@@ -101,6 +106,28 @@ async def ready():
         "timestamp": int(time.time())
     }
 
+@router.get("/metrics")
+async def metrics():
+    """
+    Prometheus metrics endpoint
+    
+    Returns metrics in Prometheus text format for monitoring and alerting.
+    Includes counters, histograms, and gauges for request tracking, performance
+    monitoring, and system health.
+    """
+    # Set service info if not already set
+    set_service_info(
+        version="0.0.1",
+        build_date="2024-01-XX",
+        git_commit="unknown"
+    )
+    
+    metrics_data = get_metrics()
+    return Response(
+        content=metrics_data,
+        media_type=get_metrics_content_type()
+    )
+
 @router.post("/v1/u/{user_id}/precheck", response_model=DecisionResponse)
 async def precheck(
     user_id: str,
@@ -112,42 +139,75 @@ async def precheck(
     if not rate_limiter.is_allowed(f"precheck:{user_id}", limit=100, window=60):
         raise HTTPException(status_code=429, detail="rate limit exceeded")
     
-    start_ts = int(time.time())
-    result = evaluate(req.tool, req.scope, req.payload, start_ts, direction="ingress")
+    # Metrics: Track active requests
+    set_active_requests("precheck", 1)
     
-    # Build event
-    event = {
-        "event_type": "policy.decision.v1",
-        "direction": "ingress",
-        "user_id": user_id,
-        "tool": req.tool,
-        "scope": req.scope,
-        "corr_id": req.corr_id,
-        "decision": result["decision"],
-        "policy_id": result.get("policy_id"),
-        "reasons": result.get("reasons", []),
-        "payload_before": req.payload,
-        "payload_after": result.get("payload_out"),
-        "ts": start_ts,
-    }
+    start_time = time.time()
+    start_ts = int(start_time)
     
-    # Fire and forget (don't block response path)
     try:
-        asyncio.create_task(emit_event(event))
-    except RuntimeError:
-        # If no running loop (tests), do it inline once
-        await emit_event(event)
+        result = evaluate(req.tool, req.scope, req.payload, start_ts, direction="ingress")
+        
+        # Metrics: Record policy evaluation
+        policy_eval_duration = time.time() - start_time
+        record_policy_evaluation(
+            tool=req.tool,
+            direction="ingress", 
+            policy_id=result.get("policy_id", "unknown"),
+            duration=policy_eval_duration
+        )
+        
+        # Build event
+        event = {
+            "event_type": "policy.decision.v1",
+            "direction": "ingress",
+            "user_id": user_id,
+            "tool": req.tool,
+            "scope": req.scope,
+            "corr_id": req.corr_id,
+            "decision": result["decision"],
+            "policy_id": result.get("policy_id"),
+            "reasons": result.get("reasons", []),
+            "payload_before": req.payload,
+            "payload_after": result.get("payload_out"),
+            "ts": start_ts,
+        }
+        
+        # Fire and forget (don't block response path)
+        try:
+            asyncio.create_task(emit_event(event))
+        except RuntimeError:
+            # If no running loop (tests), do it inline once
+            await emit_event(event)
+        
+        # Audit log before response
+        audit_log("precheck", 
+                  user_id=user_id, 
+                  tool=req.tool, 
+                  decision=result["decision"], 
+                  corr_id=req.corr_id,
+                  policy_id=result.get("policy_id"),
+                  reasons=result.get("reasons", []))
+        
+        # Metrics: Record precheck request
+        total_duration = time.time() - start_time
+        record_precheck_request(
+            user_id=user_id,
+            tool=req.tool,
+            decision=result["decision"],
+            policy_id=result.get("policy_id", "unknown"),
+            duration=total_duration
+        )
+        
+        return DecisionResponse(**result)
     
-    # Audit log before response
-    audit_log("precheck", 
-              user_id=user_id, 
-              tool=req.tool, 
-              decision=result["decision"], 
-              corr_id=req.corr_id,
-              policy_id=result.get("policy_id"),
-              reasons=result.get("reasons", []))
+    except Exception as e:
+        # Re-raise the exception after clearing metrics
+        raise e
     
-    return DecisionResponse(**result)
+    finally:
+        # Metrics: Clear active requests
+        set_active_requests("precheck", 0)
 
 @router.post("/v1/u/{user_id}/postcheck", response_model=DecisionResponse)
 async def postcheck(
@@ -160,39 +220,72 @@ async def postcheck(
     if not rate_limiter.is_allowed(f"postcheck:{user_id}", limit=100, window=60):
         raise HTTPException(status_code=429, detail="rate limit exceeded")
     
-    start_ts = int(time.time())
-    result = evaluate(req.tool, req.scope, req.payload, start_ts, direction="egress")
+    # Metrics: Track active requests
+    set_active_requests("postcheck", 1)
     
-    # Build event
-    event = {
-        "event_type": "policy.decision.v1",
-        "direction": "egress",
-        "user_id": user_id,
-        "tool": req.tool,
-        "scope": req.scope,
-        "corr_id": req.corr_id,
-        "decision": result["decision"],
-        "policy_id": result.get("policy_id"),
-        "reasons": result.get("reasons", []),
-        "payload_before": req.payload,
-        "payload_after": result.get("payload_out"),
-        "ts": start_ts,
-    }
+    start_time = time.time()
+    start_ts = int(start_time)
     
-    # Fire and forget (don't block response path)
     try:
-        asyncio.create_task(emit_event(event))
-    except RuntimeError:
-        # If no running loop (tests), do it inline once
-        await emit_event(event)
+        result = evaluate(req.tool, req.scope, req.payload, start_ts, direction="egress")
+        
+        # Metrics: Record policy evaluation
+        policy_eval_duration = time.time() - start_time
+        record_policy_evaluation(
+            tool=req.tool,
+            direction="egress",
+            policy_id=result.get("policy_id", "unknown"),
+            duration=policy_eval_duration
+        )
+        
+        # Build event
+        event = {
+            "event_type": "policy.decision.v1",
+            "direction": "egress",
+            "user_id": user_id,
+            "tool": req.tool,
+            "scope": req.scope,
+            "corr_id": req.corr_id,
+            "decision": result["decision"],
+            "policy_id": result.get("policy_id"),
+            "reasons": result.get("reasons", []),
+            "payload_before": req.payload,
+            "payload_after": result.get("payload_out"),
+            "ts": start_ts,
+        }
+        
+        # Fire and forget (don't block response path)
+        try:
+            asyncio.create_task(emit_event(event))
+        except RuntimeError:
+            # If no running loop (tests), do it inline once
+            await emit_event(event)
+        
+        # Audit log before response
+        audit_log("postcheck", 
+                  user_id=user_id, 
+                  tool=req.tool, 
+                  decision=result["decision"], 
+                  corr_id=req.corr_id,
+                  policy_id=result.get("policy_id"),
+                  reasons=result.get("reasons", []))
+        
+        # Metrics: Record postcheck request
+        total_duration = time.time() - start_time
+        record_postcheck_request(
+            user_id=user_id,
+            tool=req.tool,
+            decision=result["decision"],
+            policy_id=result.get("policy_id", "unknown"),
+            duration=total_duration
+        )
+        
+        return DecisionResponse(**result)
     
-    # Audit log before response
-    audit_log("postcheck", 
-              user_id=user_id, 
-              tool=req.tool, 
-              decision=result["decision"], 
-              corr_id=req.corr_id,
-              policy_id=result.get("policy_id"),
-              reasons=result.get("reasons", []))
+    except Exception as e:
+        # Re-raise the exception after clearing metrics
+        raise e
     
-    return DecisionResponse(**result)
+    finally:
+        # Metrics: Clear active requests
+        set_active_requests("postcheck", 0)
