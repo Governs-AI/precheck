@@ -125,6 +125,58 @@ GET /v1/health
 }
 ```
 
+### Readiness Check
+```
+GET /v1/ready
+```
+
+**Purpose**: Comprehensive readiness check for Kubernetes probes and service validation
+
+**Response**:
+```json
+{
+  "ready": true,
+  "service": "governsai-precheck",
+  "version": "0.0.1",
+  "checks": {
+    "presidio": {
+      "status": "ok",
+      "message": "Presidio analyzer and anonymizer initialized"
+    },
+    "policy": {
+      "status": "ok", 
+      "message": "Policy loaded with 3 sections"
+    },
+    "policy_file": {
+      "status": "ok",
+      "message": "Policy file exists: policy.tool_access.yaml"
+    },
+    "environment": {
+      "status": "ok",
+      "message": "Environment variables: {'PII_TOKEN_SALT': 'ok', 'ON_ERROR': 'ok'}"
+    },
+    "dlq": {
+      "status": "ok",
+      "message": "DLQ directory accessible: /tmp"
+    }
+  },
+  "timestamp": 1758812000
+}
+```
+
+**Readiness Checks**:
+- **Presidio**: Analyzer and anonymizer initialization status
+- **Policy**: Policy file parsing and validation
+- **Policy File**: File existence and accessibility
+- **Environment**: Critical environment variables availability
+- **DLQ**: Dead letter queue directory accessibility
+
+**Status Values**:
+- `"ok"`: Check passed successfully
+- `"warning"`: Check passed with warnings
+- `"error"`: Check failed, service not ready
+- `"disabled"`: Check not applicable (e.g., Presidio disabled)
+
 ## Event Schema
 
 ### Policy Decision Event
