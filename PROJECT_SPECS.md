@@ -45,6 +45,23 @@ GovernsAI Precheck is a policy evaluation and PII redaction service that provide
 - **File change detection**: Automatic reload when policy file is modified
 - **Global defaults**: Organization-wide policy stance configuration
 
+## API Documentation
+
+### OpenAPI Specification
+The complete API specification is available in OpenAPI 3.1.0 format:
+- **File**: `openapi.json` (included in repository)
+- **Interactive Docs**: `http://localhost:8080/docs` (Swagger UI)
+- **Alternative Docs**: `http://localhost:8080/redoc` (ReDoc)
+- **Schema**: `http://localhost:8080/openapi.json` (JSON schema)
+
+### Policy Precedence in API Responses
+All API responses include a `policy_id` field that indicates which precedence level was applied:
+- **`deny-exec`**: DENY_TOOLS level (highest priority)
+- **`tool-access`**: TOOL_SPECIFIC level
+- **`defaults`**: GLOBAL_DEFAULTS level
+- **`net-redact-presidio`** or **`net-redact-regex`**: NETWORK_SCOPE level
+- **`default-redact`**: SAFE_FALLBACK level (lowest priority)
+
 ## API Endpoints
 
 ### Precheck Endpoint
@@ -193,6 +210,55 @@ The policy file supports global defaults for each direction:
 - **`egress`**: Default action for postcheck requests
 - **Tool-specific rules** override global defaults
 - **Fallback**: Safe redaction if no rules apply
+
+## Policy Precedence Rules
+
+The policy evaluation system follows a strict precedence hierarchy (highest to lowest priority):
+
+### 1. **DENY_TOOLS** (Highest Priority)
+- **Purpose**: Hard deny for dangerous tools
+- **Tools**: `python.exec`, `bash.exec`, `code.exec`, `shell.exec`
+- **Decision**: Always `deny`
+- **Policy ID**: `deny-exec`
+- **Reason**: `blocked tool: code/exec`
+
+### 2. **TOOL_SPECIFIC** (High Priority)
+- **Purpose**: Tool-specific rules in `policy.tool_access.yaml`
+- **Condition**: Tool exists in `tool_access` section and direction matches
+- **Actions**: `pass_through`, `tokenize`, `redact`, `deny`
+- **Policy ID**: `tool-access`
+- **Override**: Takes precedence over all lower levels
+
+### 3. **GLOBAL_DEFAULTS** (Medium Priority)
+- **Purpose**: Global defaults for direction (ingress/egress)
+- **Condition**: No tool-specific rule applies
+- **Actions**: `pass_through`, `tokenize`, `redact`, `deny`
+- **Policy ID**: `defaults`
+- **Override**: Takes precedence over network scope and fallback
+
+### 4. **NETWORK_SCOPE** (Low Priority)
+- **Purpose**: Network scope redaction for external tools
+- **Condition**: Scope starts with `net.` or tool starts with `web.`, `http.`, `fetch.`, `request.`
+- **Actions**: Always `redact` (PII detection and redaction)
+- **Policy ID**: `net-redact-presidio` or `net-redact-regex`
+- **Override**: Takes precedence over safe fallback
+
+### 5. **SAFE_FALLBACK** (Lowest Priority)
+- **Purpose**: Default redaction for all other cases
+- **Condition**: No other rules apply
+- **Actions**: Always `redact` (PII detection and redaction)
+- **Policy ID**: `default-redact`
+- **Override**: Final fallback for safety
+
+### Precedence Examples
+
+| Tool | Scope | Direction | Rule Applied | Policy ID | Reason |
+|------|-------|-----------|--------------|-----------|---------|
+| `python.exec` | `net.external` | `ingress` | DENY_TOOLS | `deny-exec` | `blocked tool: code/exec` |
+| `verify_identity` | `net.external` | `ingress` | TOOL_SPECIFIC | `tool-access` | `pii.allowed:PII:email_address` |
+| `unknown_tool` | `net.external` | `ingress` | GLOBAL_DEFAULTS | `defaults` | `default.ingress.redact` |
+| `web.fetch` | `internal` | `ingress` | NETWORK_SCOPE | `net-redact-presidio` | `pii.redacted:email_address` |
+| `random_tool` | `internal` | `ingress` | SAFE_FALLBACK | `default-redact` | `pii.redacted:email_address` |
 
 ### Policy Directions
 
@@ -576,17 +642,6 @@ curl -X POST http://localhost:8080/v1/u/u1/postcheck \
 ## License
 
 MIT License - see LICENSE file for details.
-
-## Recent Changes Log
-- **2024-01-XX**: Added failure contract with configurable error handling (block/pass/best_effort)
-- **2024-01-XX**: Implemented structured JSON audit logging for governance
-- **2024-01-XX**: Added YAML policy hot-reload functionality
-- **2024-01-XX**: Added global defaults support in policy configuration
-- **2024-01-XX**: Implemented DLQ and event emission system with HMAC authentication
-- **2024-01-XX**: Added webhook retry logic with exponential backoff
-- **2024-01-XX**: Updated event schema to policy.decision.v1 format
-- **2024-01-XX**: Added comprehensive webhook configuration options
-- **2024-01-XX**: Implemented fire-and-forget event emission to maintain response times
 
 ## Support
 

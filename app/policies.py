@@ -422,9 +422,21 @@ def evaluate(tool: str, scope: Optional[str], payload: Dict, now: int, direction
             }
 
 def _evaluate_policy(tool: str, scope: Optional[str], payload: Dict, now: int, direction: str = "ingress") -> Dict:
-    """Internal policy evaluation logic"""
+    """
+    Internal policy evaluation logic with explicit precedence rules.
     
-    # 1) Hard deny for dangerous tools
+    POLICY PRECEDENCE (highest to lowest priority):
+    1. DENY_TOOLS: Hard deny for dangerous tools (python.exec, bash.exec, etc.)
+    2. TOOL_SPECIFIC: Tool-specific rules in policy.tool_access.yaml
+    3. GLOBAL_DEFAULTS: Global defaults for direction (ingress/egress)
+    4. NETWORK_SCOPE: Network scope redaction (net.* scopes or web.* tools)
+    5. SAFE_FALLBACK: Default redaction for all other cases
+    
+    Each level can override lower levels. Tool-specific rules take precedence
+    over global defaults, which take precedence over network scope rules.
+    """
+    
+    # PRECEDENCE LEVEL 1: Hard deny for dangerous tools
     if tool in DENY_TOOLS:
         return {
             "decision": "deny",
@@ -433,11 +445,12 @@ def _evaluate_policy(tool: str, scope: Optional[str], payload: Dict, now: int, d
             "ts": now
         }
     
-    # 2) Check for tool-specific access rules (ingress or egress)
+    # Load current policy (with hot-reload support)
     policy = get_policy()
     tool_access = policy.get("tool_access", {})
     defaults = policy.get("defaults", {})
     
+    # PRECEDENCE LEVEL 2: Tool-specific access rules (highest priority for non-dangerous tools)
     if tool in tool_access and tool_access[tool].get("direction") == direction:
         # Run PII detection to get findings
         findings = []
@@ -475,7 +488,7 @@ def _evaluate_policy(tool: str, scope: Optional[str], payload: Dict, now: int, d
                 "ts": now
             }
     
-    # 3) Check defaults for this direction
+    # PRECEDENCE LEVEL 3: Global defaults for this direction
     default_action = defaults.get(direction, {}).get("action", "redact")
     
     if default_action == "deny":
@@ -509,7 +522,7 @@ def _evaluate_policy(tool: str, scope: Optional[str], payload: Dict, now: int, d
             "ts": now
         }
     
-    # 4) Redact for network scopes/tools (existing behavior)
+    # PRECEDENCE LEVEL 4: Network scope redaction (net.* scopes or web.* tools)
     if (scope or "").startswith(NET_SCOPES) or tool.startswith(NET_TOOLS_PREFIX):
         new_payload, reasons = redact_obj(payload)
         reasons = sorted(list(reasons))
@@ -521,7 +534,7 @@ def _evaluate_policy(tool: str, scope: Optional[str], payload: Dict, now: int, d
             "ts": now
         }
     
-    # 5) Default redaction (safe fallback)
+    # PRECEDENCE LEVEL 5: Safe fallback (default redaction for all other cases)
     new_payload, reasons = redact_obj(payload)
     reasons = sorted(list(reasons))
     return {
