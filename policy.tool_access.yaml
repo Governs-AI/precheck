@@ -1,4 +1,10 @@
 version: v1
+defaults:
+  ingress:
+    action: redact  # or deny | pass_through | tokenize
+  egress:
+    action: redact
+
 tool_access:
   verify_identity:
     direction: ingress         # only apply on precheck

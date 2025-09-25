@@ -248,24 +248,31 @@ def redact_obj(obj: Any, reasons: Optional[Set[str]] = None, field_name: str = "
     
     return obj, reasons
 
-# Tool access policy configuration
-TOOL_ACCESS = None
+# Tool access policy configuration with hot-reload
+_POLICY_PATH = os.getenv("POLICY_FILE", os.path.join(os.path.dirname(__file__), "..", "policy.tool_access.yaml"))
+_POLICY_CACHE: Dict[str, Any] = {}
+_POLICY_MTIME = 0.0
 TOKEN_SALT = os.getenv("PII_TOKEN_SALT", "default-salt-change-in-production")
 
-def load_tool_access_policy():
-    """Load tool access policy from YAML file"""
-    global TOOL_ACCESS
+def _load_policy() -> Dict[str, Any]:
+    """Load policy with hot-reload support"""
+    global _POLICY_CACHE, _POLICY_MTIME
     try:
-        policy_path = os.path.join(os.path.dirname(__file__), "..", "policy.tool_access.yaml")
-        if os.path.exists(policy_path):
-            with open(policy_path, 'r') as f:
-                data = yaml.safe_load(f)
-                TOOL_ACCESS = data.get("tool_access", {})
-        else:
-            TOOL_ACCESS = {}
+        mtime = os.path.getmtime(_POLICY_PATH)
+        if mtime != _POLICY_MTIME:
+            with open(_POLICY_PATH, "r", encoding="utf-8") as f:
+                _POLICY_CACHE = yaml.safe_load(f) or {}
+            _POLICY_MTIME = mtime
+    except FileNotFoundError:
+        _POLICY_CACHE = {}
     except Exception as e:
-        print(f"Failed to load tool access policy: {e}")
-        TOOL_ACCESS = {}
+        print(f"Failed to load policy file: {e}")
+        _POLICY_CACHE = {}
+    return _POLICY_CACHE
+
+def get_policy() -> Dict[str, Any]:
+    """Get current policy with hot-reload - cheap check every call"""
+    return _load_policy()
 
 def tokenize(value: str) -> str:
     """Create a stable token for PII values"""
@@ -310,7 +317,11 @@ def set_jsonpath(obj: Any, path: str, value: Any) -> None:
 
 def apply_tool_access(tool_name: str, findings: List[Dict], payload_dict: Dict) -> Tuple[Dict, List[str]]:
     """Apply tool-specific PII access rules"""
-    cfg = TOOL_ACCESS.get(tool_name, {})
+    policy = get_policy()
+    tool_access = policy.get("tool_access", {})
+    defaults = policy.get("defaults", {})
+    
+    cfg = tool_access.get(tool_name, {})
     allow_map = cfg.get("allow_pii", {})
     
     transformed = deepcopy(payload_dict)
@@ -352,11 +363,66 @@ DENY_TOOLS = {"python.exec", "bash.exec", "code.exec", "shell.exec"}
 NET_SCOPES = ("net.",)
 NET_TOOLS_PREFIX = ("web.", "http.", "fetch.", "request.")
 
-# Load tool access policy on module import
-load_tool_access_policy()
-
 def evaluate(tool: str, scope: Optional[str], payload: Dict, now: int, direction: str = "ingress") -> Dict:
     """Evaluate policy and return decision with optional payload transformation"""
+    try:
+        return _evaluate_policy(tool, scope, payload, now, direction)
+    except Exception as e:
+        # Handle errors based on ON_ERROR setting
+        from .settings import settings
+        error_behavior = settings.on_error
+        
+        if error_behavior == "block":
+            return {
+                "decision": "deny",
+                "reasons": ["precheck.error"],
+                "policy_id": "error-handler",
+                "ts": now
+            }
+        elif error_behavior == "pass":
+            return {
+                "decision": "pass_through",
+                "reasons": ["precheck.bypass"],
+                "policy_id": "error-handler",
+                "ts": now
+            }
+        elif error_behavior == "best_effort":
+            # Try regex fallback, else tokenize everything blindly
+            try:
+                new_payload, reasons = redact_obj(payload)
+                return {
+                    "decision": "transform",
+                    "payload_out": new_payload,
+                    "reasons": reasons or ["precheck.best_effort"],
+                    "policy_id": "error-handler-regex",
+                    "ts": now
+                }
+            except Exception:
+                # Last resort: tokenize everything
+                transformed = {}
+                for key, value in payload.items():
+                    if isinstance(value, str):
+                        transformed[key] = tokenize(value)
+                    else:
+                        transformed[key] = value
+                return {
+                    "decision": "transform",
+                    "payload_out": transformed,
+                    "reasons": ["precheck.best_effort_tokenize"],
+                    "policy_id": "error-handler-tokenize",
+                    "ts": now
+                }
+        else:
+            # Default to block
+            return {
+                "decision": "deny",
+                "reasons": ["precheck.error"],
+                "policy_id": "error-handler",
+                "ts": now
+            }
+
+def _evaluate_policy(tool: str, scope: Optional[str], payload: Dict, now: int, direction: str = "ingress") -> Dict:
+    """Internal policy evaluation logic"""
     
     # 1) Hard deny for dangerous tools
     if tool in DENY_TOOLS:
@@ -368,7 +434,11 @@ def evaluate(tool: str, scope: Optional[str], payload: Dict, now: int, direction
         }
     
     # 2) Check for tool-specific access rules (ingress or egress)
-    if tool in TOOL_ACCESS and TOOL_ACCESS[tool].get("direction") == direction:
+    policy = get_policy()
+    tool_access = policy.get("tool_access", {})
+    defaults = policy.get("defaults", {})
+    
+    if tool in tool_access and tool_access[tool].get("direction") == direction:
         # Run PII detection to get findings
         findings = []
         if USE_PRESIDIO and ANALYZER is not None:
@@ -405,7 +475,41 @@ def evaluate(tool: str, scope: Optional[str], payload: Dict, now: int, direction
                 "ts": now
             }
     
-    # 3) Redact for network scopes/tools (existing behavior)
+    # 3) Check defaults for this direction
+    default_action = defaults.get(direction, {}).get("action", "redact")
+    
+    if default_action == "deny":
+        return {
+            "decision": "deny",
+            "reasons": [f"default.{direction}.deny"],
+            "policy_id": "defaults",
+            "ts": now
+        }
+    elif default_action == "pass_through":
+        return {
+            "decision": "allow",
+            "payload_out": payload,
+            "reasons": [f"default.{direction}.pass_through"],
+            "policy_id": "defaults",
+            "ts": now
+        }
+    elif default_action == "tokenize":
+        # Tokenize all string values
+        transformed = {}
+        for key, value in payload.items():
+            if isinstance(value, str):
+                transformed[key] = tokenize(value)
+            else:
+                transformed[key] = value
+        return {
+            "decision": "transform",
+            "payload_out": transformed,
+            "reasons": [f"default.{direction}.tokenize"],
+            "policy_id": "defaults",
+            "ts": now
+        }
+    
+    # 4) Redact for network scopes/tools (existing behavior)
     if (scope or "").startswith(NET_SCOPES) or tool.startswith(NET_TOOLS_PREFIX):
         new_payload, reasons = redact_obj(payload)
         reasons = sorted(list(reasons))
@@ -417,10 +521,13 @@ def evaluate(tool: str, scope: Optional[str], payload: Dict, now: int, direction
             "ts": now
         }
     
-    # 4) Allow by default
+    # 5) Default redaction (safe fallback)
+    new_payload, reasons = redact_obj(payload)
+    reasons = sorted(list(reasons))
     return {
-        "decision": "allow",
-        "payload_out": payload,
-        "policy_id": "none",
+        "decision": "transform",
+        "payload_out": new_payload,
+        "reasons": reasons or None,
+        "policy_id": "default-redact",
         "ts": now
     }

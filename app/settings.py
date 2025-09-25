@@ -27,7 +27,17 @@ class Settings(BaseSettings):
     
     # Webhook configuration
     next_webhook_url: Optional[str] = None
+    webhook_secret: str = "dev-secret"
     precheck_dlq: str = "/tmp/precheck.dlq.jsonl"
+    webhook_timeout_s: float = 2.5
+    webhook_max_retries: int = 3
+    webhook_backoff_base_ms: int = 150
+    
+    # PII tokenization
+    pii_token_salt: str = "default-salt-change-in-production"
+    
+    # Error handling behavior
+    on_error: str = "block"  # block | pass | best_effort
     
     class Config:
         env_file = ".env"

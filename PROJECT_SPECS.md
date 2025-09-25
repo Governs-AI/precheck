@@ -24,6 +24,27 @@ GovernsAI Precheck is a policy evaluation and PII redaction service that provide
 - **Multiple PII types**: Email, SSN, phone numbers, credit cards, API keys, JWT tokens
 - **False positive filtering**: Context-aware filtering to reduce false positives
 
+### 4. Event Emission & Monitoring
+- **Webhook events**: Real-time policy decision events with HMAC authentication
+- **Dead Letter Queue (DLQ)**: Failed webhook deliveries stored in JSONL format
+- **Retry logic**: Exponential backoff with configurable retry attempts
+- **Event schema**: Versioned event format for backward compatibility
+
+### 5. Failure Contract & Error Handling
+- **Configurable error behavior**: `block`, `pass`, or `best_effort` modes
+- **Graceful degradation**: Fallback strategies when policy evaluation fails
+- **HTTP status codes**: Proper error responses with structured reasons
+
+### 6. Audit Logging & Governance
+- **Structured JSON logs**: One line per request for easy parsing
+- **Provable governance**: Complete audit trail without database dependency
+- **Log shipping ready**: Compatible with Loki/Datadog ingestion
+
+### 7. Policy Hot-Reload
+- **Live policy updates**: Reload policies without service restart
+- **File change detection**: Automatic reload when policy file is modified
+- **Global defaults**: Organization-wide policy stance configuration
+
 ## API Endpoints
 
 ### Precheck Endpoint
@@ -87,12 +108,54 @@ GET /v1/health
 }
 ```
 
+## Event Schema
+
+### Policy Decision Event
+Every policy decision emits a webhook event with the following schema:
+
+```json
+{
+  "event_type": "policy.decision.v1",
+  "direction": "ingress",
+  "user_id": "u1",
+  "tool": "verify_identity",
+  "scope": "net.external",
+  "corr_id": "req-123",
+  "decision": "transform",
+  "policy_id": "tool-access",
+  "reasons": ["pii.allowed:PII:email_address","pii.tokenized:PII:us_ssn"],
+  "payload_before": {"email":"alice@example.com","ssn":"123-45-6789"},
+  "payload_after": {"email":"alice@example.com","ssn":"pii_8797942a"},
+  "ts": 1758745697
+}
+```
+
+### Event Fields
+- **`event_type`**: Versioned event type for backward compatibility
+- **`direction`**: `"ingress"` for precheck, `"egress"` for postcheck
+- **`user_id`**: User identifier from the request path
+- **`tool`**: Tool name from the request
+- **`scope`**: Network scope from the request
+- **`corr_id`**: Correlation ID for request tracking
+- **`decision`**: Policy decision (`allow`, `deny`, `transform`)
+- **`policy_id`**: Identifier of the policy that made the decision
+- **`reasons`**: Array of reason codes explaining the decision
+- **`payload_before`**: Original payload before transformation
+- **`payload_after`**: Transformed payload after policy application
+- **`ts`**: Unix timestamp of the decision
+
 ## Policy Configuration
 
 ### Tool Access Policy (`policy.tool_access.yaml`)
 
 ```yaml
 version: v1
+defaults:
+  ingress:
+    action: redact  # or deny | pass_through | tokenize
+  egress:
+    action: redact
+
 tool_access:
   verify_identity:
     direction: ingress         # only apply on precheck
@@ -120,7 +183,16 @@ tool_access:
 
 - **`pass_through`**: Allow raw PII value to pass through unchanged
 - **`tokenize`**: Replace PII with stable token (e.g., `pii_8797942a`)
-- **Default**: Apply standard redaction (e.g., `<USER_EMAIL>`, `<USER_SSN>`)
+- **`redact`**: Apply standard redaction (e.g., `<USER_EMAIL>`, `<USER_SSN>`)
+- **`deny`**: Block the request entirely
+
+### Global Defaults
+
+The policy file supports global defaults for each direction:
+- **`ingress`**: Default action for precheck requests
+- **`egress`**: Default action for postcheck requests
+- **Tool-specific rules** override global defaults
+- **Fallback**: Safe redaction if no rules apply
 
 ### Policy Directions
 
@@ -181,6 +253,8 @@ app/
 ├── api.py           # API endpoints and webhook handling
 ├── models.py        # Pydantic models for requests/responses
 ├── policies.py      # Policy evaluation and PII processing
+├── events.py        # Event emission and DLQ handling
+├── log.py           # Structured audit logging
 ├── auth.py          # API key authentication
 ├── rate_limit.py    # Rate limiting implementation
 ├── storage.py       # Data persistence layer
@@ -202,6 +276,14 @@ graph TD
     H --> I[Transform Payload]
     I --> J[Return Response]
     J --> K[Emit Webhook Event]
+    K --> L{Webhook Success?}
+    L -->|Yes| M[Event Delivered]
+    L -->|No| N[Retry with Backoff]
+    N --> O{Max Retries?}
+    O -->|No| N
+    O -->|Yes| P[Write to DLQ]
+    J --> Q[Audit Log]
+    Q --> R[Return Response]
 ```
 
 ### PII Processing Flow
@@ -230,6 +312,12 @@ graph TD
 | `PII_TOKEN_SALT` | Salt for token generation | `default-salt-change-in-production` |
 | `PRECHECK_DLQ` | Dead letter queue path | `/tmp/precheck.dlq.jsonl` |
 | `NEXT_WEBHOOK_URL` | Webhook URL for events | None |
+| `WEBHOOK_SECRET` | Secret for HMAC signing | `dev-secret` |
+| `WEBHOOK_TIMEOUT_S` | Webhook request timeout | `2.5` |
+| `WEBHOOK_MAX_RETRIES` | Maximum retry attempts | `3` |
+| `WEBHOOK_BACKOFF_BASE_MS` | Base backoff delay in ms | `150` |
+| `ON_ERROR` | Error handling behavior | `block` |
+| `POLICY_FILE` | Policy file path | `policy.tool_access.yaml` |
 | `USE_PRESIDIO` | Enable Presidio PII detection | `true` |
 | `PRESIDIO_MODEL` | spaCy model for Presidio | `en_core_web_sm` |
 
@@ -259,9 +347,11 @@ graph TD
 - False positive filtering
 
 ### Webhook Security
-- Retry logic with exponential backoff
-- Dead letter queue for failed deliveries
-- Configurable timeout and retry attempts
+- **HMAC authentication**: SHA-256 based signature verification
+- **Retry logic**: Exponential backoff with configurable attempts
+- **Dead letter queue**: Failed deliveries stored in JSONL format
+- **Configurable timeouts**: Customizable request timeouts and retry delays
+- **Fire-and-forget**: Non-blocking event emission to maintain response times
 
 ## Deployment
 
@@ -486,6 +576,17 @@ curl -X POST http://localhost:8080/v1/u/u1/postcheck \
 ## License
 
 MIT License - see LICENSE file for details.
+
+## Recent Changes Log
+- **2024-01-XX**: Added failure contract with configurable error handling (block/pass/best_effort)
+- **2024-01-XX**: Implemented structured JSON audit logging for governance
+- **2024-01-XX**: Added YAML policy hot-reload functionality
+- **2024-01-XX**: Added global defaults support in policy configuration
+- **2024-01-XX**: Implemented DLQ and event emission system with HMAC authentication
+- **2024-01-XX**: Added webhook retry logic with exponential backoff
+- **2024-01-XX**: Updated event schema to policy.decision.v1 format
+- **2024-01-XX**: Added comprehensive webhook configuration options
+- **2024-01-XX**: Implemented fire-and-forget event emission to maintain response times
 
 ## Support
 
