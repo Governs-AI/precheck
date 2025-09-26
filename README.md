@@ -102,7 +102,7 @@ The service can be configured via environment variables:
 | `REDIS_URL` | `None` | Redis connection URL (optional) |
 | `USE_PRESIDIO` | `true` | Enable Presidio PII detection |
 | `PRESIDIO_MODEL` | `en_core_web_sm` | spaCy model for Presidio |
-| `NEXT_WEBHOOK_URL` | `None` | Webhook URL for dashboard events |
+| `WEBHOOK_URL` | `None` | Webhook URL for dashboard events |
 | `PRECHECK_DLQ` | `/tmp/precheck.dlq.jsonl` | Dead letter queue file path |
 
 ## PII Detection
@@ -144,14 +144,14 @@ The service emits fire-and-forget webhook events for all precheck and postcheck 
 ```
 
 ### Configuration
-- Set `NEXT_WEBHOOK_URL` environment variable to enable webhook emission
+- Set `WEBHOOK_URL` environment variable to enable webhook emission
 - Failed webhook deliveries are written to DLQ file (configurable via `PRECHECK_DLQ`)
 - Webhook includes retry logic with exponential backoff (0.5s, 1s, 2s)
 
 ### Testing
 Use the provided webhook test URL for development:
 ```bash
-export NEXT_WEBHOOK_URL="https://webhook-test.com/1508b1ea2414ed242d2b8abf6ea66616"
+export WEBHOOK_URL="https://webhook-test.com/1508b1ea2414ed242d2b8abf6ea66616"
 ```
 
 ## Policy Configuration

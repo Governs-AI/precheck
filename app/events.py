@@ -8,7 +8,7 @@ import pathlib
 import asyncio
 from typing import Any, Dict, Optional
 
-WEBHOOK_URL = os.getenv("NEXT_WEBHOOK_URL")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "dev-secret")
 DLQ_PATH = os.getenv("PRECHECK_DLQ", "/tmp/precheck.dlq.jsonl")
 TIMEOUT_S = float(os.getenv("WEBHOOK_TIMEOUT_S", "2.5"))
@@ -33,9 +33,9 @@ async def _sleep_ms(ms: int):
     await asyncio.sleep(ms / 1000.0)
 
 async def emit_event(event: Dict[str, Any]) -> None:
-    """POSTs the event to NEXT_WEBHOOK_URL with HMAC signature header.
+    """POSTs the event to WEBHOOK_URL with HMAC signature header.
     Falls back to DLQ (jsonl) after retries."""
-    webhook_url = os.getenv("NEXT_WEBHOOK_URL")
+    webhook_url = os.getenv("WEBHOOK_URL")
     dlq_path = os.getenv("PRECHECK_DLQ", "/tmp/precheck.dlq.jsonl")
     
     if not webhook_url:

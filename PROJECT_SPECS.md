@@ -510,7 +510,7 @@ graph TD
 |----------|-------------|---------|
 | `PII_TOKEN_SALT` | Salt for token generation | `default-salt-change-in-production` |
 | `PRECHECK_DLQ` | Dead letter queue path | `/tmp/precheck.dlq.jsonl` |
-| `NEXT_WEBHOOK_URL` | Webhook URL for events | None |
+| `WEBHOOK_URL` | Webhook URL for events | None |
 | `WEBHOOK_SECRET` | Secret for HMAC signing | `dev-secret` |
 | `WEBHOOK_TIMEOUT_S` | Webhook request timeout | `2.5` |
 | `WEBHOOK_MAX_RETRIES` | Maximum retry attempts | `3` |

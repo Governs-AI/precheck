@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     demo_api_key: str = "GAI_LOCAL_DEV_ABC"
     
     # Webhook configuration
-    next_webhook_url: Optional[str] = None
+    WEBHOOK_URL: Optional[str] = None
     webhook_secret: str = "dev-secret"
     precheck_dlq: str = "/tmp/precheck.dlq.jsonl"
     webhook_timeout_s: float = 2.5
