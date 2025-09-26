@@ -3,17 +3,51 @@ from .models import PrePostCheckRequest, DecisionResponse
 from .auth import require_api_key
 from .policies import evaluate
 from .rate_limit import rate_limiter
-from .events import emit_event
+from .events import emit_event, get_webhook_config
 from .log import audit_log
 from .metrics import (
     get_metrics, get_metrics_content_type, set_service_info,
     record_precheck_request, record_postcheck_request, record_policy_evaluation,
     set_active_requests
 )
+from .settings import settings
 import time
 import asyncio
+import hashlib
+import json
+from datetime import datetime
+from typing import List, Tuple
 
 router = APIRouter()
+
+def extract_pii_info_from_reasons(reasons: List[str]) -> Tuple[List[str], float]:
+    """Extract PII types and calculate confidence from reason codes"""
+    pii_types = []
+    confidence_scores = []
+    
+    for reason in reasons:
+        if reason.startswith("pii."):
+            # Extract PII type from reason codes like "pii.redacted:PII:email_address"
+            parts = reason.split(":")
+            if len(parts) >= 3:
+                pii_type = parts[2]  # e.g., "email_address"
+                pii_types.append(pii_type)
+                
+                # Assign confidence based on action type
+                action = parts[1]  # e.g., "redacted", "allowed", "tokenized"
+                if action == "allowed":
+                    confidence_scores.append(0.9)  # High confidence for allowed
+                elif action == "tokenized":
+                    confidence_scores.append(0.8)  # High confidence for tokenized
+                elif action == "redacted":
+                    confidence_scores.append(0.7)  # Medium confidence for redacted
+                else:
+                    confidence_scores.append(0.5)  # Default confidence
+    
+    # Calculate average confidence, default to 0.95 if no PII detected
+    avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0.95
+    
+    return pii_types, avg_confidence
 
 @router.get("/v1/health")
 async def health():
@@ -157,28 +191,48 @@ async def precheck(
             duration=policy_eval_duration
         )
         
-        # Build event
-        event = {
-            "event_type": "policy.decision.v1",
-            "direction": "ingress",
-            "user_id": user_id,
-            "tool": req.tool,
-            "scope": req.scope,
-            "corr_id": req.corr_id,
-            "decision": result["decision"],
-            "policy_id": result.get("policy_id"),
-            "reasons": result.get("reasons", []),
-            "payload_before": req.payload,
-            "payload_after": result.get("payload_out"),
-            "ts": start_ts,
-        }
+        # Extract PII information from reasons
+        pii_types, confidence = extract_pii_info_from_reasons(result.get("reasons", []))
         
-        # Fire and forget (don't block response path)
-        try:
-            asyncio.create_task(emit_event(event))
-        except RuntimeError:
-            # If no running loop (tests), do it inline once
-            await emit_event(event)
+        # Get webhook configuration from URL
+        webhook_org_id, webhook_channel, webhook_api_key = get_webhook_config()
+        
+        # Skip webhook emission if required values are not available from URL
+        if not webhook_org_id or not webhook_channel:
+            print(f"Warning: Missing webhook configuration - orgId: {webhook_org_id}, channel: {webhook_channel}")
+            # Still return the response, just skip webhook emission
+        else:
+            # Build event
+            event = {
+                "type": "INGEST",
+                "channel": webhook_channel,
+                "schema": "decision.v1",
+                "idempotencyKey": f"precheck-{start_ts}-{req.corr_id or 'unknown'}",
+                "data": {
+                    "orgId": webhook_org_id,
+                    "direction": "precheck",
+                    "decision": result["decision"],
+                    "tool": req.tool,
+                    "scope": req.scope,
+                    "detectorSummary": {
+                        "reasons": result.get("reasons", []),
+                        "confidence": confidence,
+                        "piiDetected": pii_types
+                    },
+                    "payloadHash": f"sha256:{hashlib.sha256(json.dumps(req.payload, sort_keys=True).encode()).hexdigest()}",
+                    "latencyMs": int((time.time() - start_time) * 1000),
+                    "correlationId": req.corr_id,
+                    "tags": [],  # TODO: Extract from request or make configurable
+                    "ts": f"{datetime.fromtimestamp(start_ts).isoformat()}Z"
+                }
+            }
+            
+            # Fire and forget (don't block response path)
+            try:
+                asyncio.create_task(emit_event(event))
+            except RuntimeError:
+                # If no running loop (tests), do it inline once
+                await emit_event(event)
         
         # Audit log before response
         audit_log("precheck", 
@@ -238,28 +292,48 @@ async def postcheck(
             duration=policy_eval_duration
         )
         
-        # Build event
-        event = {
-            "event_type": "policy.decision.v1",
-            "direction": "egress",
-            "user_id": user_id,
-            "tool": req.tool,
-            "scope": req.scope,
-            "corr_id": req.corr_id,
-            "decision": result["decision"],
-            "policy_id": result.get("policy_id"),
-            "reasons": result.get("reasons", []),
-            "payload_before": req.payload,
-            "payload_after": result.get("payload_out"),
-            "ts": start_ts,
-        }
+        # Extract PII information from reasons
+        pii_types, confidence = extract_pii_info_from_reasons(result.get("reasons", []))
         
-        # Fire and forget (don't block response path)
-        try:
-            asyncio.create_task(emit_event(event))
-        except RuntimeError:
-            # If no running loop (tests), do it inline once
-            await emit_event(event)
+        # Get webhook configuration from URL
+        webhook_org_id, webhook_channel, webhook_api_key = get_webhook_config()
+        
+        # Skip webhook emission if required values are not available from URL
+        if not webhook_org_id or not webhook_channel:
+            print(f"Warning: Missing webhook configuration - orgId: {webhook_org_id}, channel: {webhook_channel}")
+            # Still return the response, just skip webhook emission
+        else:
+            # Build event
+            event = {
+                "type": "INGEST",
+                "channel": webhook_channel,
+                "schema": "decision.v1",
+                "idempotencyKey": f"postcheck-{start_ts}-{req.corr_id or 'unknown'}",
+                "data": {
+                    "orgId": webhook_org_id,
+                    "direction": "postcheck",
+                    "decision": result["decision"],
+                    "tool": req.tool,
+                    "scope": req.scope,
+                    "detectorSummary": {
+                        "reasons": result.get("reasons", []),
+                        "confidence": confidence,
+                        "piiDetected": pii_types
+                    },
+                    "payloadHash": f"sha256:{hashlib.sha256(json.dumps(req.payload, sort_keys=True).encode()).hexdigest()}",
+                    "latencyMs": int((time.time() - start_time) * 1000),
+                    "correlationId": req.corr_id,
+                    "tags": [],  # TODO: Extract from request or make configurable
+                    "ts": f"{datetime.fromtimestamp(start_ts).isoformat()}Z"
+                }
+            }
+            
+            # Fire and forget (don't block response path)
+            try:
+                asyncio.create_task(emit_event(event))
+            except RuntimeError:
+                # If no running loop (tests), do it inline once
+                await emit_event(event)
         
         # Audit log before response
         audit_log("postcheck", 

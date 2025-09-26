@@ -1,29 +1,55 @@
-import hmac
-import hashlib
 import json
 import time
-import httpx
-import os
 import pathlib
 import asyncio
-from typing import Any, Dict, Optional
+import websockets
+from urllib.parse import urlparse, parse_qs
+from typing import Any, Dict, Optional, Tuple
+from .settings import settings
 
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "dev-secret")
-DLQ_PATH = os.getenv("PRECHECK_DLQ", "/tmp/precheck.dlq.jsonl")
-TIMEOUT_S = float(os.getenv("WEBHOOK_TIMEOUT_S", "2.5"))
-MAX_RETRIES = int(os.getenv("WEBHOOK_MAX_RETRIES", "3"))
-BACKOFF_BASE_MS = int(os.getenv("WEBHOOK_BACKOFF_BASE_MS", "150"))
+def _parse_webhook_url(webhook_url: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Parse webhook URL to extract org ID, decisions channel, and API key"""
+    if not webhook_url:
+        return None, None, None
+    
+    try:
+        parsed = urlparse(webhook_url)
+        query_params = parse_qs(parsed.query)
+        
+        # Extract org ID from 'org' parameter
+        org_id = query_params.get('org', [None])[0]
+        
+        # Extract API key from 'key' parameter
+        api_key = query_params.get('key', [None])[0]
+        
+        # Extract decisions channel from 'channels' parameter
+        channels = query_params.get('channels', [None])[0]
+        decisions_channel = None
+        
+        if channels:
+            # Split channels by comma and find the decisions channel
+            channel_list = [ch.strip() for ch in channels.split(',')]
+            for channel in channel_list:
+                if channel.endswith(':decisions'):
+                    decisions_channel = channel
+                    break
+        
+        return org_id, decisions_channel, api_key
+    except Exception as e:
+        print(f"Error parsing webhook URL: {e}")
+        return None, None, None
 
-def _sign(body: bytes, ts: int) -> str:
-    """Create HMAC signature for webhook authentication"""
-    msg = f"{ts}.".encode() + body
-    sig = hmac.new(WEBHOOK_SECRET.encode(), msg, hashlib.sha256).hexdigest()
-    return f"v1,t={ts},s={sig}"
+def get_webhook_config() -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Get organization ID, webhook channel, and API key from webhook URL"""
+    webhook_url = settings.webhook_url
+    if not webhook_url:
+        return None, None, None
+    
+    return _parse_webhook_url(webhook_url)
 
 def _write_dlq(event: Dict[str, Any], err: str, dlq_path: Optional[str] = None) -> None:
     """Write failed event to dead letter queue"""
-    path = dlq_path or DLQ_PATH
+    path = dlq_path or settings.precheck_dlq
     pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps({"err": err, "event": event}) + "\n")
@@ -33,38 +59,58 @@ async def _sleep_ms(ms: int):
     await asyncio.sleep(ms / 1000.0)
 
 async def emit_event(event: Dict[str, Any]) -> None:
-    """POSTs the event to WEBHOOK_URL with HMAC signature header.
+    """Sends the event via WebSocket to WEBHOOK_URL.
     Falls back to DLQ (jsonl) after retries."""
-    webhook_url = os.getenv("WEBHOOK_URL")
-    dlq_path = os.getenv("PRECHECK_DLQ", "/tmp/precheck.dlq.jsonl")
+    webhook_url = settings.webhook_url
+    print(f"WEBHOOK_URL: {webhook_url}")
+    dlq_path = settings.precheck_dlq
     
     if not webhook_url:
         _write_dlq(event, "webhook_url_not_configured", dlq_path)
         return
 
-    body = json.dumps(event, separators=(",", ":"), ensure_ascii=False).encode()
-    ts = int(time.time())
+    # Use the WebSocket URL as-is (don't force SSL conversion)
+    websocket_url = webhook_url
 
-    headers = {
-        "Content-Type": "application/json",
-        "X-Governs-Signature": _sign(body, ts),
-        "X-Governs-Event-Type": event.get("event_type", "policy.decision.v1"),
-        "X-Governs-Corr-Id": event.get("corr_id", "-"),
-    }
+    # Prepare the message as JSON
+    message = json.dumps(event, separators=(",", ":"), ensure_ascii=False)
+    print(f"WebSocket message: {message}")
 
-    # Retry with exponential backoff (jitter optional)
-    delay_ms = BACKOFF_BASE_MS
-    for attempt in range(1, MAX_RETRIES + 1):
+    # Retry with exponential backoff
+    delay_ms = settings.webhook_backoff_base_ms
+    for attempt in range(1, settings.webhook_max_retries + 1):
         try:
-            async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
-                resp = await client.post(WEBHOOK_URL, content=body, headers=headers)
-                if 200 <= resp.status_code < 300:
-                    return
-                err = f"http_{resp.status_code}"
+            # Use open_timeout and close_timeout instead of timeout
+            async with websockets.connect(
+                websocket_url, 
+                open_timeout=settings.webhook_timeout_s,
+                close_timeout=settings.webhook_timeout_s
+            ) as websocket:
+                await websocket.send(message)
+                print(f"WebSocket message sent successfully")
+                return
         except Exception as e:
-            err = f"exception:{type(e).__name__}:{str(e)[:200]}"
+            err = f"websocket_exception:{type(e).__name__}:{str(e)[:200]}"
+            print(f"WebSocket attempt {attempt} failed: {err}")
+            
+            # If it's an SSL error and we're using wss://, try ws:// instead
+            if "SSL" in str(e) and websocket_url.startswith("wss://"):
+                try:
+                    fallback_url = websocket_url.replace("wss://", "ws://", 1)
+                    print(f"Trying fallback URL: {fallback_url}")
+                    async with websockets.connect(
+                        fallback_url, 
+                        open_timeout=settings.webhook_timeout_s,
+                        close_timeout=settings.webhook_timeout_s
+                    ) as websocket:
+                        await websocket.send(message)
+                        print(f"WebSocket message sent successfully via fallback")
+                        return
+                except Exception as fallback_e:
+                    err = f"websocket_fallback_exception:{type(fallback_e).__name__}:{str(fallback_e)[:200]}"
+                    print(f"WebSocket fallback attempt failed: {err}")
 
-        if attempt == MAX_RETRIES:
+        if attempt == settings.webhook_max_retries:
             _write_dlq(event, err, dlq_path)
             return
         await _sleep_ms(delay_ms)

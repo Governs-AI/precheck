@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     demo_api_key: str = "GAI_LOCAL_DEV_ABC"
     
     # Webhook configuration
-    WEBHOOK_URL: Optional[str] = None
+    webhook_url: Optional[str] = None
     webhook_secret: str = "dev-secret"
     precheck_dlq: str = "/tmp/precheck.dlq.jsonl"
     webhook_timeout_s: float = 2.5
@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     
     # Error handling behavior
     on_error: str = "block"  # block | pass | best_effort
+    
+    # Policy file configuration
+    policy_file: str = "policy.tool_access.yaml"
     
     class Config:
         env_file = ".env"

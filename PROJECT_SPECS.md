@@ -265,34 +265,71 @@ Every policy decision emits a webhook event with the following schema:
 
 ```json
 {
-  "event_type": "policy.decision.v1",
-  "direction": "ingress",
-  "user_id": "u1",
-  "tool": "verify_identity",
-  "scope": "net.external",
-  "corr_id": "req-123",
-  "decision": "transform",
-  "policy_id": "tool-access",
-  "reasons": ["pii.allowed:PII:email_address","pii.tokenized:PII:us_ssn"],
-  "payload_before": {"email":"alice@example.com","ssn":"123-45-6789"},
-  "payload_after": {"email":"alice@example.com","ssn":"pii_8797942a"},
-  "ts": 1758745697
+  "type": "INGEST",
+  "channel": "org:YOUR_ORG:decisions",
+  "schema": "decision.v1",
+  "idempotencyKey": "precheck-1735229123456-abc123def",
+  "data": {
+    "orgId": "YOUR_ORG_ID",
+    "direction": "precheck",
+    "decision": "transform",
+    "tool": "verify_identity",
+    "scope": "net.external",
+    "detectorSummary": {
+      "reasons": ["pii.allowed:PII:email_address","pii.tokenized:PII:us_ssn"],
+      "confidence": 0.85,
+      "piiDetected": ["email_address", "us_ssn"]
+    },
+    "payloadHash": "sha256:a1b2c3d4e5f6...",
+    "latencyMs": 45,
+    "correlationId": "req-123",
+    "tags": ["production", "api-call"],
+    "ts": "2024-12-26T10:15:30.123Z"
+  }
 }
 ```
 
 ### Event Fields
-- **`event_type`**: Versioned event type for backward compatibility
-- **`direction`**: `"ingress"` for precheck, `"egress"` for postcheck
-- **`user_id`**: User identifier from the request path
+
+#### Top-Level Fields
+- **`type`**: Event type, always `"INGEST"` for decision events
+- **`channel`**: WebSocket channel format `"org:{ORG_ID}:decisions"`
+- **`schema`**: Schema version, currently `"decision.v1"`
+- **`idempotencyKey`**: Unique key for deduplication (format: `{direction}-{timestamp}-{correlation_id}`)
+
+#### Data Fields
+- **`orgId`**: Organization identifier (configurable via `ORG_ID` environment variable)
+- **`direction`**: `"precheck"` for ingress, `"postcheck"` for egress
+- **`decision`**: Policy decision (`allow`, `deny`, `transform`)
 - **`tool`**: Tool name from the request
 - **`scope`**: Network scope from the request
-- **`corr_id`**: Correlation ID for request tracking
-- **`decision`**: Policy decision (`allow`, `deny`, `transform`)
-- **`policy_id`**: Identifier of the policy that made the decision
-- **`reasons`**: Array of reason codes explaining the decision
-- **`payload_before`**: Original payload before transformation
-- **`payload_after`**: Transformed payload after policy application
-- **`ts`**: Unix timestamp of the decision
+- **`detectorSummary`**: PII detection results and confidence
+  - **`reasons`**: Array of reason codes explaining the decision
+  - **`confidence`**: Calculated confidence score (0.0-1.0) based on PII detection actions
+  - **`piiDetected`**: Array of detected PII types (e.g., `["email_address", "us_ssn"]`)
+- **`payloadHash`**: SHA256 hash of the request payload for integrity verification
+- **`latencyMs`**: Processing time in milliseconds
+- **`correlationId`**: Correlation ID for request tracking
+- **`tags`**: Array of strings for categorization (currently empty, configurable)
+- **`ts`**: ISO 8601 timestamp of the decision
+
+### WebSocket Webhook Integration
+
+The service uses WebSocket connections to send webhook events instead of HTTP POST requests:
+
+**URL Format**: `ws://host:port/api/ws/gateway?key=API_KEY&org=ORG_ID&channels=CHANNEL_LIST`
+
+**Example**:
+```
+ws://172.16.10.59:3002/api/ws/gateway?key=gai_827eode3nxa&org=dfy&channels=org:cmfzriajm0003fyp86ocrgjoj:decisions,org:cmfzriajm0003fyp86ocrgjoj:postcheck,org:cmfzriajm0003fyp86ocrgjoj:dlq,org:cmfzriajm0003fyp86ocrgjoj:precheck,org:cmfzriajm0003fyp86ocrgjoj:approvals,user:cmfzriaip0000fyp81gjfkri9:notifications
+```
+
+**Parsed Values**:
+- **`orgId`**: Extracted from `org` parameter (`dfy`)
+- **`channel`**: Extracted from `channels` parameter, finds the `:decisions` channel (`org:cmfzriajm0003fyp86ocrgjoj:decisions`)
+- **`apiKey`**: Extracted from `key` parameter (`gai_827eode3nxa`)
+
+**Dynamic Configuration**: All values are dynamically extracted from the webhook URL. If parsing fails or required values (`orgId` or `channel`) are not found in the URL, webhook emission is skipped with a warning message. The service will still process the request and return a response, but no webhook event will be emitted.
 
 ## Policy Configuration
 
@@ -571,6 +608,9 @@ dependencies = [
     "redis>=5.0.0",
     "python-multipart>=0.0.6",
     "pyyaml>=6.0.0",
+    "httpx>=0.25.0",
+    "websockets>=12.0",
+    "prometheus-client>=0.19.0",
 ]
 ```
 
@@ -730,6 +770,20 @@ curl -X POST http://localhost:8080/v1/u/u1/postcheck \
   "ts": 1758748185
 }
 ```
+
+## Recent Changes Log
+- **2024-12-26**: Updated webhook payload structure to match new API documentation format
+  - Changed from flat event structure to nested structure with `type`, `channel`, `schema`, `idempotencyKey`, and `data` fields
+  - Updated direction mapping from `ingress`/`egress` to `precheck`/`postcheck`
+  - Added PII detection extraction with confidence scoring
+  - Added payload hash calculation using SHA256
+  - Added automatic parsing of organization ID, channel, and API key from webhook URL parameters
+  - Migrated all environment variable access to use settings module for proper .env file loading
+  - Removed all hardcoded fallback values - everything is now dynamically derived from webhook URL
+  - Added graceful handling when webhook URL parsing fails (skips webhook emission with warning)
+  - **Fixed webhook protocol**: Changed from HTTP POST to WebSocket connections
+  - **Removed HTTP headers**: WebSocket connections don't use Content-Type or X-Governs-Signature headers
+  - Updated timestamp format to ISO 8601
 
 ## Future Enhancements
 
