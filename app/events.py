@@ -71,6 +71,7 @@ async def emit_event(event: Dict[str, Any]) -> None:
 
     # Use the WebSocket URL as-is (don't force SSL conversion)
     websocket_url = webhook_url
+    print(f"WebSocket URL: {websocket_url}")
 
     # Prepare the message as JSON
     message = json.dumps(event, separators=(",", ":"), ensure_ascii=False)

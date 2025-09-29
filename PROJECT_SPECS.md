@@ -273,6 +273,9 @@ Every policy decision emits a webhook event with the following schema:
     "decision": "transform",
     "tool": "verify_identity",
     "scope": "net.external",
+    "rawText": "User email: alice@example.com, SSN: 123-45-6789",
+    "rawTextOut": "User email: alice@example.com, SSN: pii_8797942a",
+    "reasons": ["pii.allowed:PII:email_address","pii.tokenized:PII:us_ssn"],
     "detectorSummary": {
       "reasons": ["pii.allowed:PII:email_address","pii.tokenized:PII:us_ssn"],
       "confidence": 0.85,
@@ -305,6 +308,9 @@ Every policy decision emits a webhook event with the following schema:
 - **`decision`**: Policy decision (`allow`, `deny`, `transform`)
 - **`tool`**: Tool name from the request
 - **`scope`**: Network scope from the request
+- **`rawText`**: Original raw text input from the request
+- **`rawTextOut`**: Processed text output with redundant values replaced
+- **`reasons`**: Array of reason codes explaining the decision
 - **`detectorSummary`**: PII detection results and confidence
   - **`reasons`**: Array of reason codes explaining the decision
   - **`confidence`**: Calculated confidence score (0.0-1.0) based on PII detection actions
@@ -334,7 +340,7 @@ ws://172.16.10.59:3002/api/ws/gateway?key=gai_827eode3nxa&org=dfy&channels=org:c
 - **`channel`**: Extracted from `channels` parameter, finds the `:decisions` channel (`org:cmfzriajm0003fyp86ocrgjoj:decisions`)
 - **`apiKey`**: Extracted from `key` parameter (`gai_827eode3nxa`)
 
-**Dynamic Configuration**: All values are dynamically extracted from the webhook URL. If parsing fails or required values (`orgId` or `channel`) are not found in the URL, webhook emission is skipped with a warning message. The service will still process the request and return a response, but no webhook event will be emitted.
+**Dynamic Configuration**: All values are dynamically extracted from the webhook URL. If parsing fails or values (`orgId` or `channel`) are not found in the URL, they will be `null` in the webhook event, but the event will still be emitted. The service will always process the request and emit webhook events regardless of URL parsing success.
 
 ## Policy Configuration
 
@@ -764,6 +770,8 @@ curl -X POST http://localhost:8080/v1/u/u1/postcheck \
   - **Backward Compatibility**: Maintained legacy model aliases for gradual migration
   - **WebSocket Authentication**: Added `authentication` object to webhook events containing `userId` and `apiKey`
   - **Removed API Authentication**: Removed `X-Governs-Key` authentication enforcement from API endpoints, now passed to WebSocket for handling
+  - **Removed Webhook Validation**: Removed validation that prevented webhook emission when `orgId` or `channel` are `None` - webhook events are now always sent
+  - **Enhanced Webhook Events**: Added `rawText`, `rawTextOut`, and `reasons` fields to webhook events for complete request/response context
 - **2024-12-26**: Updated webhook payload structure to match new API documentation format
   - Changed from flat event structure to nested structure with `type`, `channel`, `schema`, `idempotencyKey`, and `data` fields
   - Updated direction mapping from `ingress`/`egress` to `precheck`/`postcheck`

@@ -202,46 +202,44 @@ async def precheck(
         # Get webhook configuration from URL
         webhook_org_id, webhook_channel, webhook_api_key = get_webhook_config()
         
-        # Skip webhook emission if required values are not available from URL
-        if not webhook_org_id or not webhook_channel:
-            print(f"Warning: Missing webhook configuration - orgId: {webhook_org_id}, channel: {webhook_channel}")
-            # Still return the response, just skip webhook emission
-        else:
-            # Build event
-            event = {
-                "type": "INGEST",
-                "channel": webhook_channel,
-                "schema": "decision.v1",
-                "idempotencyKey": f"precheck-{start_ts}-{req.corr_id or 'unknown'}",
-                "data": {
-                    "orgId": webhook_org_id,
-                    "direction": "precheck",
-                    "decision": result["decision"],
-                    "tool": req.tool,
-                    "scope": req.scope,
-                    "detectorSummary": {
-                        "reasons": result.get("reasons", []),
-                        "confidence": confidence,
-                        "piiDetected": pii_types
-                    },
-                    "payloadHash": f"sha256:{hashlib.sha256(req.raw_text.encode()).hexdigest()}",
-                    "latencyMs": int((time.time() - start_time) * 1000),
-                    "correlationId": req.corr_id,
-                    "tags": [],  # TODO: Extract from request or make configurable
-                    "ts": f"{datetime.fromtimestamp(start_ts).isoformat()}Z",
-                    "authentication": {
-                        "userId": user_id,
-                        "apiKey": api_key
-                    }
+        # Build event (always send, even if orgId or channel are None)
+        event = {
+            "type": "INGEST",
+            "channel": webhook_channel,
+            "schema": "decision.v1",
+            "idempotencyKey": f"precheck-{start_ts}-{req.corr_id or 'unknown'}",
+            "data": {
+                "orgId": webhook_org_id,
+                "direction": "precheck",
+                "decision": result["decision"],
+                "tool": req.tool,
+                "scope": req.scope,
+                "rawText": req.raw_text,
+                "rawTextOut": result.get("raw_text_out", ""),
+                "reasons": result.get("reasons", []),
+                "detectorSummary": {
+                    "reasons": result.get("reasons", []),
+                    "confidence": confidence,
+                    "piiDetected": pii_types
+                },
+                "payloadHash": f"sha256:{hashlib.sha256(req.raw_text.encode()).hexdigest()}",
+                "latencyMs": int((time.time() - start_time) * 1000),
+                "correlationId": req.corr_id,
+                "tags": [],  # TODO: Extract from request or make configurable
+                "ts": f"{datetime.fromtimestamp(start_ts).isoformat()}Z",
+                "authentication": {
+                    "userId": user_id,
+                    "apiKey": api_key
                 }
             }
-            
-            # Fire and forget (don't block response path)
-            try:
-                asyncio.create_task(emit_event(event))
-            except RuntimeError:
-                # If no running loop (tests), do it inline once
-                await emit_event(event)
+        }
+        
+        # Fire and forget (don't block response path)
+        try:
+            asyncio.create_task(emit_event(event))
+        except RuntimeError:
+            # If no running loop (tests), do it inline once
+            await emit_event(event)
         
         # Audit log before response
         audit_log("precheck", 
@@ -310,46 +308,44 @@ async def postcheck(
         # Get webhook configuration from URL
         webhook_org_id, webhook_channel, webhook_api_key = get_webhook_config()
         
-        # Skip webhook emission if required values are not available from URL
-        if not webhook_org_id or not webhook_channel:
-            print(f"Warning: Missing webhook configuration - orgId: {webhook_org_id}, channel: {webhook_channel}")
-            # Still return the response, just skip webhook emission
-        else:
-            # Build event
-            event = {
-                "type": "INGEST",
-                "channel": webhook_channel,
-                "schema": "decision.v1",
-                "idempotencyKey": f"postcheck-{start_ts}-{req.corr_id or 'unknown'}",
-                "data": {
-                    "orgId": webhook_org_id,
-                    "direction": "postcheck",
-                    "decision": result["decision"],
-                    "tool": req.tool,
-                    "scope": req.scope,
-                    "detectorSummary": {
-                        "reasons": result.get("reasons", []),
-                        "confidence": confidence,
-                        "piiDetected": pii_types
-                    },
-                    "payloadHash": f"sha256:{hashlib.sha256(req.raw_text.encode()).hexdigest()}",
-                    "latencyMs": int((time.time() - start_time) * 1000),
-                    "correlationId": req.corr_id,
-                    "tags": [],  # TODO: Extract from request or make configurable
-                    "ts": f"{datetime.fromtimestamp(start_ts).isoformat()}Z",
-                    "authentication": {
-                        "userId": user_id,
-                        "apiKey": api_key
-                    }
+        # Build event (always send, even if orgId or channel are None)
+        event = {
+            "type": "INGEST",
+            "channel": webhook_channel,
+            "schema": "decision.v1",
+            "idempotencyKey": f"postcheck-{start_ts}-{req.corr_id or 'unknown'}",
+            "data": {
+                "orgId": webhook_org_id,
+                "direction": "postcheck",
+                "decision": result["decision"],
+                "tool": req.tool,
+                "scope": req.scope,
+                "rawText": req.raw_text,
+                "rawTextOut": result.get("raw_text_out", ""),
+                "reasons": result.get("reasons", []),
+                "detectorSummary": {
+                    "reasons": result.get("reasons", []),
+                    "confidence": confidence,
+                    "piiDetected": pii_types
+                },
+                "payloadHash": f"sha256:{hashlib.sha256(req.raw_text.encode()).hexdigest()}",
+                "latencyMs": int((time.time() - start_time) * 1000),
+                "correlationId": req.corr_id,
+                "tags": [],  # TODO: Extract from request or make configurable
+                "ts": f"{datetime.fromtimestamp(start_ts).isoformat()}Z",
+                "authentication": {
+                    "userId": user_id,
+                    "apiKey": api_key
                 }
             }
-            
-            # Fire and forget (don't block response path)
-            try:
-                asyncio.create_task(emit_event(event))
-            except RuntimeError:
-                # If no running loop (tests), do it inline once
-                await emit_event(event)
+        }
+        
+        # Fire and forget (don't block response path)
+        try:
+            asyncio.create_task(emit_event(event))
+        except RuntimeError:
+            # If no running loop (tests), do it inline once
+            await emit_event(event)
         
         # Audit log before response
         audit_log("postcheck", 
