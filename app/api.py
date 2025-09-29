@@ -16,14 +16,17 @@ import asyncio
 import hashlib
 import json
 from datetime import datetime
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 router = APIRouter()
 
-def extract_pii_info_from_reasons(reasons: List[str]) -> Tuple[List[str], float]:
+def extract_pii_info_from_reasons(reasons: Optional[List[str]]) -> Tuple[List[str], float]:
     """Extract PII types and calculate confidence from reason codes"""
     pii_types = []
     confidence_scores = []
+    
+    if not reasons:
+        return pii_types, 0.95  # Default confidence when no reasons
     
     for reason in reasons:
         if reason.startswith("pii."):
