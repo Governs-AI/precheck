@@ -180,7 +180,7 @@ async def precheck(
     start_ts = int(start_time)
     
     try:
-        result = evaluate(req.tool, req.scope, req.payload, start_ts, direction="ingress")
+        result = evaluate(req.tool, req.scope, req.raw_text, start_ts, direction="ingress")
         
         # Metrics: Record policy evaluation
         policy_eval_duration = time.time() - start_time
@@ -219,7 +219,7 @@ async def precheck(
                         "confidence": confidence,
                         "piiDetected": pii_types
                     },
-                    "payloadHash": f"sha256:{hashlib.sha256(json.dumps(req.payload, sort_keys=True).encode()).hexdigest()}",
+                    "payloadHash": f"sha256:{hashlib.sha256(req.raw_text.encode()).hexdigest()}",
                     "latencyMs": int((time.time() - start_time) * 1000),
                     "correlationId": req.corr_id,
                     "tags": [],  # TODO: Extract from request or make configurable
@@ -281,7 +281,7 @@ async def postcheck(
     start_ts = int(start_time)
     
     try:
-        result = evaluate(req.tool, req.scope, req.payload, start_ts, direction="egress")
+        result = evaluate(req.tool, req.scope, req.raw_text, start_ts, direction="egress")
         
         # Metrics: Record policy evaluation
         policy_eval_duration = time.time() - start_time
@@ -320,7 +320,7 @@ async def postcheck(
                         "confidence": confidence,
                         "piiDetected": pii_types
                     },
-                    "payloadHash": f"sha256:{hashlib.sha256(json.dumps(req.payload, sort_keys=True).encode()).hexdigest()}",
+                    "payloadHash": f"sha256:{hashlib.sha256(req.raw_text.encode()).hexdigest()}",
                     "latencyMs": int((time.time() - start_time) * 1000),
                     "correlationId": req.corr_id,
                     "tags": [],  # TODO: Extract from request or make configurable

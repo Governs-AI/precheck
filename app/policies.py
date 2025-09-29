@@ -315,6 +315,44 @@ def set_jsonpath(obj: Any, path: str, value: Any) -> None:
     if isinstance(current, dict):
         current[parts[-1]] = value
 
+def apply_tool_access_text(tool_name: str, findings: List[Dict], raw_text: str) -> Tuple[str, List[str]]:
+    """Apply tool-specific PII access rules to raw text"""
+    policy = get_policy()
+    tool_access = policy.get("tool_access", {})
+    
+    cfg = tool_access.get(tool_name, {})
+    allow_map = cfg.get("allow_pii", {})
+    
+    transformed_text = raw_text
+    reasons = []
+    
+    # Process findings in reverse order to maintain correct indices
+    for f in sorted(findings, key=lambda x: x["start"], reverse=True):
+        pii_type = f.get("type", "")  # e.g., "PII:email_address"
+        start = f.get("start", 0)
+        end = f.get("end", 0)
+        original_text = f.get("text", "")
+        
+        action = allow_map.get(pii_type)
+        
+        if action == "pass_through":
+            reasons.append(f"pii.allowed:{pii_type}")
+            continue
+        elif action == "tokenize":
+            tokenized_value = tokenize(original_text)
+            transformed_text = transformed_text[:start] + tokenized_value + transformed_text[end:]
+            reasons.append(f"pii.tokenized:{pii_type}")
+        else:
+            # Fall back to default redaction (mask/remove)
+            if USE_PRESIDIO and ANALYZER is not None:
+                redacted, _ = anonymize_text_presidio(original_text)
+            else:
+                redacted, _ = anonymize_text_regex(original_text)
+            transformed_text = transformed_text[:start] + redacted + transformed_text[end:]
+            reasons.append(f"pii.redacted:{pii_type}")
+    
+    return transformed_text, reasons
+
 def apply_tool_access(tool_name: str, findings: List[Dict], payload_dict: Dict) -> Tuple[Dict, List[str]]:
     """Apply tool-specific PII access rules"""
     policy = get_policy()
@@ -363,10 +401,10 @@ DENY_TOOLS = {"python.exec", "bash.exec", "code.exec", "shell.exec"}
 NET_SCOPES = ("net.",)
 NET_TOOLS_PREFIX = ("web.", "http.", "fetch.", "request.")
 
-def evaluate(tool: str, scope: Optional[str], payload: Dict, now: int, direction: str = "ingress") -> Dict:
+def evaluate(tool: str, scope: Optional[str], raw_text: str, now: int, direction: str = "ingress") -> Dict:
     """Evaluate policy and return decision with optional payload transformation"""
     try:
-        return _evaluate_policy(tool, scope, payload, now, direction)
+        return _evaluate_policy(tool, scope, raw_text, now, direction)
     except Exception as e:
         # Handle errors based on ON_ERROR setting
         from .settings import settings
@@ -389,25 +427,23 @@ def evaluate(tool: str, scope: Optional[str], payload: Dict, now: int, direction
         elif error_behavior == "best_effort":
             # Try regex fallback, else tokenize everything blindly
             try:
-                new_payload, reasons = redact_obj(payload)
+                if USE_PRESIDIO and ANALYZER is not None:
+                    redacted_text, reasons = anonymize_text_presidio(raw_text)
+                else:
+                    redacted_text, reasons = anonymize_text_regex(raw_text)
                 return {
                     "decision": "transform",
-                    "payload_out": new_payload,
+                    "raw_text_out": redacted_text,
                     "reasons": reasons or ["precheck.best_effort"],
                     "policy_id": "error-handler-regex",
                     "ts": now
                 }
             except Exception:
                 # Last resort: tokenize everything
-                transformed = {}
-                for key, value in payload.items():
-                    if isinstance(value, str):
-                        transformed[key] = tokenize(value)
-                    else:
-                        transformed[key] = value
+                tokenized_text = tokenize(raw_text)
                 return {
                     "decision": "transform",
-                    "payload_out": transformed,
+                    "raw_text_out": tokenized_text,
                     "reasons": ["precheck.best_effort_tokenize"],
                     "policy_id": "error-handler-tokenize",
                     "ts": now
@@ -421,9 +457,9 @@ def evaluate(tool: str, scope: Optional[str], payload: Dict, now: int, direction
                 "ts": now
             }
 
-def _evaluate_policy(tool: str, scope: Optional[str], payload: Dict, now: int, direction: str = "ingress") -> Dict:
+def _evaluate_policy(tool: str, scope: Optional[str], raw_text: str, now: int, direction: str = "ingress") -> Dict:
     """
-    Internal policy evaluation logic with explicit precedence rules.
+    Internal policy evaluation logic with explicit precedence rules for raw text processing.
     
     POLICY PRECEDENCE (highest to lowest priority):
     1. DENY_TOOLS: Hard deny for dangerous tools (python.exec, bash.exec, etc.)
@@ -452,29 +488,26 @@ def _evaluate_policy(tool: str, scope: Optional[str], payload: Dict, now: int, d
     
     # PRECEDENCE LEVEL 2: Tool-specific access rules (highest priority for non-dangerous tools)
     if tool in tool_access and tool_access[tool].get("direction") == direction:
-        # Run PII detection to get findings
+        # Run PII detection on raw text
         findings = []
         if USE_PRESIDIO and ANALYZER is not None:
-            # Analyze each field in the payload
-            for key, value in payload.items():
-                if isinstance(value, str):
-                    results = ANALYZER.analyze(text=value, entities=list(ANONYMIZE_OPERATORS.keys()), language="en")
-                    for r in results:
-                        if not is_false_positive(r.entity_type, key, value):
-                            findings.append({
-                                "type": f"PII:{r.entity_type.lower()}",
-                                "path": f"$.{key}",
-                                "start": r.start,
-                                "end": r.end,
-                                "score": r.score
-                            })
+            results = ANALYZER.analyze(text=raw_text, entities=list(ANONYMIZE_OPERATORS.keys()), language="en")
+            for r in results:
+                if not is_false_positive(r.entity_type, "", raw_text):
+                    findings.append({
+                        "type": f"PII:{r.entity_type.lower()}",
+                        "start": r.start,
+                        "end": r.end,
+                        "score": r.score,
+                        "text": raw_text[r.start:r.end]
+                    })
         
-        # Apply tool-specific transformations
+        # Apply tool-specific transformations based on findings
         if findings:
-            transformed_payload, tool_reasons = apply_tool_access(tool, findings, payload)
+            transformed_text, tool_reasons = apply_tool_access_text(tool, findings, raw_text)
             return {
                 "decision": "transform",
-                "payload_out": transformed_payload,
+                "raw_text_out": transformed_text,
                 "reasons": tool_reasons,
                 "policy_id": "tool-access",
                 "ts": now
@@ -483,7 +516,7 @@ def _evaluate_policy(tool: str, scope: Optional[str], payload: Dict, now: int, d
             # No PII found, pass through
             return {
                 "decision": "allow",
-                "payload_out": payload,
+                "raw_text_out": raw_text,
                 "policy_id": "tool-access",
                 "ts": now
             }
@@ -501,22 +534,17 @@ def _evaluate_policy(tool: str, scope: Optional[str], payload: Dict, now: int, d
     elif default_action == "pass_through":
         return {
             "decision": "allow",
-            "payload_out": payload,
+            "raw_text_out": raw_text,
             "reasons": [f"default.{direction}.pass_through"],
             "policy_id": "defaults",
             "ts": now
         }
     elif default_action == "tokenize":
-        # Tokenize all string values
-        transformed = {}
-        for key, value in payload.items():
-            if isinstance(value, str):
-                transformed[key] = tokenize(value)
-            else:
-                transformed[key] = value
+        # Tokenize the entire text
+        tokenized_text = tokenize(raw_text)
         return {
             "decision": "transform",
-            "payload_out": transformed,
+            "raw_text_out": tokenized_text,
             "reasons": [f"default.{direction}.tokenize"],
             "policy_id": "defaults",
             "ts": now
@@ -524,22 +552,28 @@ def _evaluate_policy(tool: str, scope: Optional[str], payload: Dict, now: int, d
     
     # PRECEDENCE LEVEL 4: Network scope redaction (net.* scopes or web.* tools)
     if (scope or "").startswith(NET_SCOPES) or tool.startswith(NET_TOOLS_PREFIX):
-        new_payload, reasons = redact_obj(payload)
+        if USE_PRESIDIO and ANALYZER is not None:
+            redacted_text, reasons = anonymize_text_presidio(raw_text)
+        else:
+            redacted_text, reasons = anonymize_text_regex(raw_text)
         reasons = sorted(list(reasons))
         return {
             "decision": "transform",
-            "payload_out": new_payload,
+            "raw_text_out": redacted_text,
             "reasons": reasons or None,
             "policy_id": "net-redact-presidio" if USE_PRESIDIO else "net-redact-regex",
             "ts": now
         }
     
     # PRECEDENCE LEVEL 5: Safe fallback (default redaction for all other cases)
-    new_payload, reasons = redact_obj(payload)
+    if USE_PRESIDIO and ANALYZER is not None:
+        redacted_text, reasons = anonymize_text_presidio(raw_text)
+    else:
+        redacted_text, reasons = anonymize_text_regex(raw_text)
     reasons = sorted(list(reasons))
     return {
         "decision": "transform",
-        "payload_out": new_payload,
+        "raw_text_out": redacted_text,
         "reasons": reasons or None,
         "policy_id": "default-redact",
         "ts": now

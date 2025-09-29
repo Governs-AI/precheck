@@ -123,10 +123,7 @@ POST /v1/u/{user_id}/precheck
 {
   "tool": "verify_identity",
   "scope": "net.external",
-  "payload": {
-    "email": "alice@example.com",
-    "ssn": "123-45-6789"
-  },
+  "raw_text": "User email: alice@example.com, SSN: 123-45-6789",
   "corr_id": "req-123",
   "tags": ["urgent", "customer"]
 }
@@ -136,10 +133,7 @@ POST /v1/u/{user_id}/precheck
 ```json
 {
   "decision": "transform",
-  "payload_out": {
-    "email": "alice@example.com",
-    "ssn": "pii_8797942a"
-  },
+  "raw_text_out": "User email: alice@example.com, SSN: pii_8797942a",
   "reasons": [
     "pii.allowed:PII:email_address",
     "pii.tokenized:PII:us_ssn"
@@ -647,10 +641,7 @@ curl -X POST http://localhost:8080/v1/u/u1/precheck \
   -d '{
     "tool": "verify_identity",
     "scope": "net.external",
-    "payload": {
-      "email": "alice@example.com",
-      "ssn": "123-45-6789"
-    },
+    "raw_text": "User email: alice@example.com, SSN: 123-45-6789",
     "corr_id": "req-123"
   }'
 ```
@@ -659,10 +650,7 @@ curl -X POST http://localhost:8080/v1/u/u1/precheck \
 ```json
 {
   "decision": "transform",
-  "payload_out": {
-    "email": "alice@example.com",
-    "ssn": "pii_8797942a"
-  },
+  "raw_text_out": "User email: alice@example.com, SSN: pii_8797942a",
   "reasons": [
     "pii.allowed:PII:email_address",
     "pii.tokenized:PII:us_ssn"
@@ -680,10 +668,7 @@ curl -X POST http://localhost:8080/v1/u/u1/precheck \
   -d '{
     "tool": "send_marketing_email",
     "scope": "net.external",
-    "payload": {
-      "email": "alice@example.com",
-      "ssn": "123-45-6789"
-    },
+    "raw_text": "Send email to alice@example.com, SSN: 123-45-6789",
     "corr_id": "req-124"
   }'
 ```
@@ -692,10 +677,7 @@ curl -X POST http://localhost:8080/v1/u/u1/precheck \
 ```json
 {
   "decision": "transform",
-  "payload_out": {
-    "email": "alice@example.com",
-    "ssn": "<USER_SSN>"
-  },
+  "raw_text_out": "Send email to alice@example.com, SSN: <USER_SSN>",
   "reasons": [
     "pii.allowed:PII:email_address",
     "pii.redacted:PII:us_ssn"
@@ -713,10 +695,7 @@ curl -X POST http://localhost:8080/v1/u/u1/postcheck \
   -d '{
     "tool": "data_export",
     "scope": "net.external",
-    "payload": {
-      "email": "alice@example.com",
-      "ssn": "123456789"
-    },
+    "raw_text": "Export data for alice@example.com, SSN: 123456789",
     "corr_id": "req-125"
   }'
 ```
@@ -725,10 +704,7 @@ curl -X POST http://localhost:8080/v1/u/u1/postcheck \
 ```json
 {
   "decision": "transform",
-  "payload_out": {
-    "email": "alice@example.com",
-    "ssn": "pii_a70ae1e6"
-  },
+  "raw_text_out": "Export data for alice@example.com, SSN: pii_a70ae1e6",
   "reasons": [
     "pii.allowed:PII:email_address",
     "pii.tokenized:PII:us_ssn"
@@ -746,10 +722,7 @@ curl -X POST http://localhost:8080/v1/u/u1/postcheck \
   -d '{
     "tool": "audit_log",
     "scope": "net.external",
-    "payload": {
-      "email": "alice@example.com",
-      "ssn": "123456789"
-    },
+    "raw_text": "Audit log for alice@example.com, SSN: 123456789",
     "corr_id": "req-126"
   }'
 ```
@@ -758,10 +731,7 @@ curl -X POST http://localhost:8080/v1/u/u1/postcheck \
 ```json
 {
   "decision": "transform",
-  "payload_out": {
-    "email": "alice@example.com",
-    "ssn": "<USER_SSN>"
-  },
+  "raw_text_out": "Audit log for alice@example.com, SSN: <USER_SSN>",
   "reasons": [
     "pii.allowed:PII:email_address",
     "pii.redacted:PII:us_ssn"
@@ -772,6 +742,15 @@ curl -X POST http://localhost:8080/v1/u/u1/postcheck \
 ```
 
 ## Recent Changes Log
+- **2024-12-26**: **BREAKING CHANGE**: Migrated API from payload-based to raw text-based processing
+  - **Request Model**: Changed `payload` field to `raw_text` (string) in `PrePostCheckRequest`
+  - **Response Model**: Changed `payload_out` field to `raw_text_out` (string) in `DecisionResponse`
+  - **Policy Evaluation**: Updated `evaluate()` function to process raw text instead of JSON payloads
+  - **PII Processing**: Added `apply_tool_access_text()` function for text-based PII transformations
+  - **API Endpoints**: Updated precheck and postcheck endpoints to handle raw text input/output
+  - **Webhook Events**: Updated payload hash calculation to use raw text instead of JSON serialization
+  - **Documentation**: Updated all API examples and test cases to use raw text format
+  - **Backward Compatibility**: Maintained legacy model aliases for gradual migration
 - **2024-12-26**: Updated webhook payload structure to match new API documentation format
   - Changed from flat event structure to nested structure with `type`, `channel`, `schema`, `idempotencyKey`, and `data` fields
   - Updated direction mapping from `ingress`/`egress` to `precheck`/`postcheck`

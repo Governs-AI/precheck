@@ -4,13 +4,13 @@ from typing import Any, Optional, List, Dict
 class PrePostCheckRequest(BaseModel):
     tool: str
     scope: Optional[str] = None
-    payload: Dict[str, Any]
+    raw_text: str  # Raw text input from user
     tags: Optional[List[str]] = None
     corr_id: Optional[str] = None
 
 class DecisionResponse(BaseModel):
     decision: str  # allow | deny | transform
-    payload_out: Optional[Dict[str, Any]] = None  # sanitized payload to forward to LLM/tool
+    raw_text_out: str  # Processed text with redundant values at place
     reasons: Optional[List[str]] = None
     policy_id: Optional[str] = None
     ts: int
