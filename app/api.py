@@ -226,7 +226,11 @@ async def precheck(
                     "latencyMs": int((time.time() - start_time) * 1000),
                     "correlationId": req.corr_id,
                     "tags": [],  # TODO: Extract from request or make configurable
-                    "ts": f"{datetime.fromtimestamp(start_ts).isoformat()}Z"
+                    "ts": f"{datetime.fromtimestamp(start_ts).isoformat()}Z",
+                    "authentication": {
+                        "userId": user_id,
+                        "apiKey": api_key
+                    }
                 }
             }
             
@@ -327,7 +331,11 @@ async def postcheck(
                     "latencyMs": int((time.time() - start_time) * 1000),
                     "correlationId": req.corr_id,
                     "tags": [],  # TODO: Extract from request or make configurable
-                    "ts": f"{datetime.fromtimestamp(start_ts).isoformat()}Z"
+                    "ts": f"{datetime.fromtimestamp(start_ts).isoformat()}Z",
+                    "authentication": {
+                        "userId": user_id,
+                        "apiKey": api_key
+                    }
                 }
             }
             

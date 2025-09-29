@@ -278,7 +278,11 @@ Every policy decision emits a webhook event with the following schema:
     "latencyMs": 45,
     "correlationId": "req-123",
     "tags": ["production", "api-call"],
-    "ts": "2024-12-26T10:15:30.123Z"
+    "ts": "2024-12-26T10:15:30.123Z",
+    "authentication": {
+      "userId": "u1",
+      "apiKey": "GAI_LOCAL_DEV_ABC"
+    }
   }
 }
 ```
@@ -306,6 +310,9 @@ Every policy decision emits a webhook event with the following schema:
 - **`correlationId`**: Correlation ID for request tracking
 - **`tags`**: Array of strings for categorization (currently empty, configurable)
 - **`ts`**: ISO 8601 timestamp of the decision
+- **`authentication`**: Authentication information from the request
+  - **`userId`**: User ID extracted from the URL path parameter
+  - **`apiKey`**: API key from the request header
 
 ### WebSocket Webhook Integration
 
@@ -751,6 +758,7 @@ curl -X POST http://localhost:8080/v1/u/u1/postcheck \
   - **Webhook Events**: Updated payload hash calculation to use raw text instead of JSON serialization
   - **Documentation**: Updated all API examples and test cases to use raw text format
   - **Backward Compatibility**: Maintained legacy model aliases for gradual migration
+  - **WebSocket Authentication**: Added `authentication` object to webhook events containing `userId` and `apiKey`
 - **2024-12-26**: Updated webhook payload structure to match new API documentation format
   - Changed from flat event structure to nested structure with `type`, `channel`, `schema`, `idempotencyKey`, and `data` fields
   - Updated direction mapping from `ingress`/`egress` to `precheck`/`postcheck`
