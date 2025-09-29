@@ -1,6 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Response
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Response, Request
 from .models import PrePostCheckRequest, DecisionResponse
-from .auth import require_api_key
 from .policies import evaluate
 from .rate_limit import rate_limiter
 from .events import emit_event, get_webhook_config
@@ -169,9 +168,12 @@ async def metrics():
 async def precheck(
     user_id: str,
     req: PrePostCheckRequest,
-    api_key: str = Depends(require_api_key)
+    request: Request
 ):
     """Precheck endpoint for policy evaluation and PII redaction"""
+    # Extract API key from headers for webhook authentication
+    api_key = request.headers.get("X-Governs-Key", "")
+    
     # Rate limiting (100 requests per minute per user)
     if not rate_limiter.is_allowed(f"precheck:{user_id}", limit=100, window=60):
         raise HTTPException(status_code=429, detail="rate limit exceeded")
@@ -274,9 +276,12 @@ async def precheck(
 async def postcheck(
     user_id: str,
     req: PrePostCheckRequest,
-    api_key: str = Depends(require_api_key)
+    request: Request
 ):
     """Postcheck endpoint for post-execution validation"""
+    # Extract API key from headers for webhook authentication
+    api_key = request.headers.get("X-Governs-Key", "")
+    
     # Rate limiting (100 requests per minute per user)
     if not rate_limiter.is_allowed(f"postcheck:{user_id}", limit=100, window=60):
         raise HTTPException(status_code=429, detail="rate limit exceeded")

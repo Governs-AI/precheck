@@ -116,7 +116,9 @@ GET /metrics
 POST /v1/u/{user_id}/precheck
 ```
 
-**Purpose**: Evaluate policy and sanitize payload before tool execution
+**Purpose**: Evaluate policy and sanitize raw text before tool execution
+
+**Authentication**: API key passed via `X-Governs-Key` header (forwarded to WebSocket for authentication)
 
 **Request**:
 ```json
@@ -148,7 +150,9 @@ POST /v1/u/{user_id}/precheck
 POST /v1/u/{user_id}/postcheck
 ```
 
-**Purpose**: Validate and sanitize payload after tool execution (egress)
+**Purpose**: Validate and sanitize raw text after tool execution (egress)
+
+**Authentication**: API key passed via `X-Governs-Key` header (forwarded to WebSocket for authentication)
 
 **Request/Response**: Same format as precheck
 
@@ -568,9 +572,9 @@ graph TD
 ## Security Features
 
 ### Authentication
-- API key-based authentication
-- Configurable API key header
-- Demo key for development/testing
+- API key passed to WebSocket for authentication handling
+- No API-level authentication enforcement
+- API key extracted from `X-Governs-Key` header and forwarded to webhook events
 
 ### Rate Limiting
 - 100 requests per minute per user
@@ -759,6 +763,7 @@ curl -X POST http://localhost:8080/v1/u/u1/postcheck \
   - **Documentation**: Updated all API examples and test cases to use raw text format
   - **Backward Compatibility**: Maintained legacy model aliases for gradual migration
   - **WebSocket Authentication**: Added `authentication` object to webhook events containing `userId` and `apiKey`
+  - **Removed API Authentication**: Removed `X-Governs-Key` authentication enforcement from API endpoints, now passed to WebSocket for handling
 - **2024-12-26**: Updated webhook payload structure to match new API documentation format
   - Changed from flat event structure to nested structure with `type`, `channel`, `schema`, `idempotencyKey`, and `data` fields
   - Updated direction mapping from `ingress`/`egress` to `precheck`/`postcheck`
