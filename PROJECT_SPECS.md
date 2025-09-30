@@ -6,17 +6,20 @@ GovernsAI Precheck is a policy evaluation and PII redaction service that provide
 
 ## Core Features
 
-### 1. Policy Evaluation Engine
+### 1. Dynamic Policy Evaluation Engine
+- **Payload-based policies**: Policies sent by agent/client in request payload
 - **Tool-based policies**: Different rules for different AI tools
 - **Scope-based policies**: Network scope restrictions (e.g., `net.external`)
 - **PII detection**: Advanced PII detection using Presidio with fallback to regex
 - **Real-time decisions**: Fast policy evaluation with sub-second response times
+- **Agent-side policy management**: Policies fetched and managed by agent, not precheck service
 
 ### 2. Per-Tool PII Access Control
 - **Tool-specific allowlists**: Configure which PII types each tool can access
 - **Transform actions**: Support for `pass_through`, `tokenize`, and default redaction
 - **Stable tokenization**: HMAC-based consistent token generation
-- **Policy configuration**: YAML-based policy files for easy management
+- **Dynamic policy configuration**: Policies sent in request payload for real-time updates
+- **Backward compatibility**: Falls back to strict PII blocking (SSN and passwords only) when no payload provided
 
 ### 3. PII Detection & Redaction
 - **Presidio integration**: Advanced NLP-based PII detection
@@ -44,6 +47,67 @@ GovernsAI Precheck is a policy evaluation and PII redaction service that provide
 - **Live policy updates**: Reload policies without service restart
 - **File change detection**: Automatic reload when policy file is modified
 - **Global defaults**: Organization-wide policy stance configuration
+
+## Dynamic Policy Architecture
+
+### Overview
+The precheck service now supports dynamic policy evaluation where policies are sent by the agent/client in the request payload, rather than being loaded from static YAML files. This enables real-time policy updates and user-specific policy management.
+
+### Policy Payload Structure
+```json
+{
+  "tool": "send_email",
+  "raw_text": "Send email to john.doe@company.com with SSN 123-45-6789",
+  "scope": "net.external",
+  "corr_id": "req-12345",
+  
+  "policy_config": {
+    "version": "v1",
+    "defaults": {
+      "ingress": {"action": "redact"},
+      "egress": {"action": "redact"}
+    },
+    "tool_access": {
+      "send_email": {
+        "direction": "ingress",
+        "action": "redact",
+        "allow_pii": {
+          "PII:email_address": "pass_through",
+          "PII:us_ssn": "tokenize"
+        }
+      }
+    },
+    "deny_tools": ["python.exec", "bash.exec", "code.exec", "shell.exec"],
+    "network_scopes": ["net."],
+    "network_tools": ["web.", "http.", "fetch.", "request."],
+    "on_error": "block"
+  },
+  
+  "tool_config": {
+    "tool_name": "send_email",
+    "scope": "net.external",
+    "direction": "ingress",
+    "metadata": {
+      "category": "communication",
+      "risk_level": "medium"
+    }
+  }
+}
+```
+
+### Policy Evaluation Flow
+1. **Agent fetches policies** from database (user/org-specific)
+2. **Agent sends policies** in request payload to precheck service
+3. **Precheck evaluates** using payload policies (no database queries)
+4. **Precheck returns** decision with transformed text
+5. **Agent handles** the response and proceeds with tool execution
+
+### Benefits
+- **🚀 Performance**: No database queries in precheck service
+- **🔄 Real-time**: Policies updated instantly without service restart
+- **🔒 Security**: User/org-specific policies
+- **📈 Scalable**: Precheck service stays lightweight
+- **🔄 Backward Compatible**: Falls back to YAML if no payload provided
 
 ## API Documentation
 
@@ -120,7 +184,36 @@ POST /v1/u/{user_id}/precheck
 
 **Authentication**: API key passed via `X-Governs-Key` header (forwarded to WebSocket for authentication)
 
-**Request**:
+**Request** (with dynamic policies):
+```json
+{
+  "tool": "verify_identity",
+  "scope": "net.external",
+  "raw_text": "User email: alice@example.com, SSN: 123-45-6789",
+  "corr_id": "req-123",
+  "tags": ["urgent", "customer"],
+  "policy_config": {
+    "version": "v1",
+    "defaults": {
+      "ingress": {"action": "redact"},
+      "egress": {"action": "redact"}
+    },
+    "tool_access": {
+      "verify_identity": {
+        "direction": "ingress",
+        "allow_pii": {
+          "PII:email_address": "pass_through",
+          "PII:us_ssn": "tokenize"
+        }
+      }
+    },
+    "deny_tools": ["python.exec", "bash.exec"],
+    "on_error": "block"
+  }
+}
+```
+
+**Request** (legacy - falls back to YAML):
 ```json
 {
   "tool": "verify_identity",
@@ -424,11 +517,11 @@ The policy evaluation system follows a strict precedence hierarchy (highest to l
 - **Policy ID**: `net-redact-presidio` or `net-redact-regex`
 - **Override**: Takes precedence over safe fallback
 
-### 5. **SAFE_FALLBACK** (Lowest Priority)
-- **Purpose**: Default redaction for all other cases
+### 5. **STRICT_FALLBACK** (Lowest Priority)
+- **Purpose**: Block only strict PII types (SSN and passwords)
 - **Condition**: No other rules apply
-- **Actions**: Always `redact` (PII detection and redaction)
-- **Policy ID**: `default-redact`
+- **Actions**: `deny` for SSN/passwords, `allow` for everything else
+- **Policy ID**: `strict-fallback`
 - **Override**: Final fallback for safety
 
 ### Precedence Examples
@@ -439,7 +532,8 @@ The policy evaluation system follows a strict precedence hierarchy (highest to l
 | `verify_identity` | `net.external` | `ingress` | TOOL_SPECIFIC | `tool-access` | `pii.allowed:PII:email_address` |
 | `unknown_tool` | `net.external` | `ingress` | GLOBAL_DEFAULTS | `defaults` | `default.ingress.redact` |
 | `web.fetch` | `internal` | `ingress` | NETWORK_SCOPE | `net-redact-presidio` | `pii.redacted:email_address` |
-| `random_tool` | `internal` | `ingress` | SAFE_FALLBACK | `default-redact` | `pii.redacted:email_address` |
+| `safe_tool` | `local` | `ingress` | STRICT_FALLBACK | `strict-fallback` | `strict_fallback.allow` |
+| `any_tool` | `local` | `ingress` | STRICT_FALLBACK | `strict-fallback` | `strict_pii_blocked:PII:us_ssn` |
 
 ### Policy Directions
 

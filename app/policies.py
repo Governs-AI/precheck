@@ -199,6 +199,10 @@ def is_false_positive(entity_type: str, field_name: str, value: str) -> bool:
     if entity_type == "US_SSN" and is_password_field(field_name):
         return True
     
+    # If the detected text is "password" or similar, it's likely a false positive for SSN
+    if entity_type == "US_SSN" and value.lower() in ["password", "pwd", "pass"]:
+        return True
+    
     # Common false positive patterns - be more conservative
     if entity_type == "US_SSN" and len(value) == 9 and value.isdigit():
         # Only filter out obvious non-SSN patterns
@@ -565,16 +569,353 @@ def _evaluate_policy(tool: str, scope: Optional[str], raw_text: str, now: int, d
             "ts": now
         }
     
-    # PRECEDENCE LEVEL 5: Safe fallback (default redaction for all other cases)
+    # PRECEDENCE LEVEL 5: Strict fallback (only block SSN and passwords)
+    return _apply_strict_fallback(raw_text, now)
+
+# NEW: Dynamic policy evaluation using payload-provided policies
+def evaluate_with_payload_policy(
+    tool: str, 
+    scope: Optional[str], 
+    raw_text: str, 
+    now: int, 
+    direction: str = "ingress",
+    policy_config: Optional[Dict] = None
+) -> Dict:
+    """
+    Evaluate policy using payload-provided configuration
+    Falls back to static YAML if no policy_config provided
+    """
+    
+    if not policy_config:
+        # Fallback to current YAML-based logic
+        return evaluate(tool, scope, raw_text, now, direction)
+    
+    # Use payload-provided policy configuration
+    return _evaluate_dynamic_policy(tool, scope, raw_text, now, direction, policy_config)
+
+def _evaluate_dynamic_policy(
+    tool: str, 
+    scope: Optional[str], 
+    raw_text: str, 
+    now: int, 
+    direction: str,
+    policy_config: Dict
+) -> Dict:
+    """Evaluate policy using dynamic configuration from payload"""
+    
+    try:
+        # PRECEDENCE LEVEL 1: Hard deny for dangerous tools
+        deny_tools = policy_config.get("deny_tools", ["python.exec", "bash.exec", "code.exec", "shell.exec"])
+        if tool in deny_tools:
+            return {
+                "decision": "deny",
+                "reasons": ["blocked tool: code/exec"],
+                "policy_id": "deny-exec",
+                "ts": now
+            }
+        
+        # PRECEDENCE LEVEL 2: Tool-specific access rules
+        tool_access = policy_config.get("tool_access", {})
+        if tool in tool_access:
+            tool_policy = tool_access[tool]
+            if tool_policy.get("direction") == direction:
+                return _apply_tool_specific_policy_dynamic(tool, raw_text, now, tool_policy)
+        
+        # PRECEDENCE LEVEL 3: Global defaults for this direction
+        defaults = policy_config.get("defaults", {})
+        default_action = defaults.get(direction, {}).get("action", "redact")
+        return _apply_default_action_dynamic(default_action, raw_text, now, direction, policy_config)
+        
+    except Exception as e:
+        # Handle errors based on policy configuration
+        error_behavior = policy_config.get("on_error", "block")
+        
+        if error_behavior == "block":
+            return {
+                "decision": "deny",
+                "reasons": ["precheck.error"],
+                "policy_id": "error-handler",
+                "ts": now
+            }
+        elif error_behavior == "pass":
+            return {
+                "decision": "allow",
+                "raw_text_out": raw_text,
+                "reasons": ["precheck.bypass"],
+                "policy_id": "error-handler",
+                "ts": now
+            }
+        elif error_behavior == "best_effort":
+            # Try regex fallback, else tokenize everything blindly
+            try:
+                if USE_PRESIDIO and ANALYZER is not None:
+                    redacted_text, reasons = anonymize_text_presidio(raw_text)
+                else:
+                    redacted_text, reasons = anonymize_text_regex(raw_text)
+                return {
+                    "decision": "transform",
+                    "raw_text_out": redacted_text,
+                    "reasons": reasons or ["precheck.best_effort"],
+                    "policy_id": "error-handler-regex",
+                    "ts": now
+                }
+            except Exception:
+                # Last resort: tokenize everything
+                tokenized_text = tokenize(raw_text)
+                return {
+                    "decision": "transform",
+                    "raw_text_out": tokenized_text,
+                    "reasons": ["precheck.best_effort_tokenize"],
+                    "policy_id": "error-handler-tokenize",
+                    "ts": now
+                }
+        else:
+            # Default to block
+            return {
+                "decision": "deny",
+                "reasons": ["precheck.error"],
+                "policy_id": "error-handler",
+                "ts": now
+            }
+
+def _apply_tool_specific_policy_dynamic(tool: str, raw_text: str, now: int, tool_policy: Dict) -> Dict:
+    """Apply tool-specific policy using dynamic configuration"""
+    
+    # Run PII detection on raw text
+    findings = []
     if USE_PRESIDIO and ANALYZER is not None:
-        redacted_text, reasons = anonymize_text_presidio(raw_text)
+        results = ANALYZER.analyze(text=raw_text, entities=list(ANONYMIZE_OPERATORS.keys()), language="en")
+        for r in results:
+            if not is_false_positive(r.entity_type, "", raw_text):
+                findings.append({
+                    "type": f"PII:{r.entity_type.lower()}",
+                    "start": r.start,
+                    "end": r.end,
+                    "score": r.score,
+                    "text": raw_text[r.start:r.end]
+                })
+    
+    # Apply tool-specific transformations based on findings and allow_pii rules
+    if findings:
+        allow_pii = tool_policy.get("allow_pii", {})
+        transformed_text, tool_reasons = apply_tool_access_text_dynamic(tool, findings, raw_text, allow_pii)
+        return {
+            "decision": "transform",
+            "raw_text_out": transformed_text,
+            "reasons": tool_reasons,
+            "policy_id": "tool-access",
+            "ts": now
+        }
     else:
-        redacted_text, reasons = anonymize_text_regex(raw_text)
-    reasons = sorted(list(reasons))
-    return {
-        "decision": "transform",
-        "raw_text_out": redacted_text,
-        "reasons": reasons or None,
-        "policy_id": "default-redact",
-        "ts": now
-    }
+        # No PII found, check if tool has default action override
+        action = tool_policy.get("action")
+        if action == "deny":
+            return {
+                "decision": "deny",
+                "reasons": ["tool-specific.deny"],
+                "policy_id": "tool-access",
+                "ts": now
+            }
+        elif action == "tokenize":
+            tokenized_text = tokenize(raw_text)
+            return {
+                "decision": "transform",
+                "raw_text_out": tokenized_text,
+                "reasons": ["tool-specific.tokenize"],
+                "policy_id": "tool-access",
+                "ts": now
+            }
+        else:
+            # Default: pass through
+            return {
+                "decision": "allow",
+                "raw_text_out": raw_text,
+                "policy_id": "tool-access",
+                "ts": now
+            }
+
+def apply_tool_access_text_dynamic(tool: str, findings: List[Dict], raw_text: str, allow_pii: Dict[str, str]) -> Tuple[str, List[str]]:
+    """Apply tool-specific text transformations using dynamic allow_pii rules"""
+    
+    transformed = raw_text
+    reasons = []
+    
+    # Sort findings by start position (reverse order to maintain indices)
+    findings_sorted = sorted(findings, key=lambda x: x["start"], reverse=True)
+    
+    for finding in findings_sorted:
+        pii_type = finding["type"]
+        start = finding["start"]
+        end = finding["end"]
+        original_text = finding["text"]
+        
+        # Check if this PII type is allowed for this tool
+        action = allow_pii.get(pii_type, "redact")  # Default to redact if not specified
+        
+        if action == "pass_through":
+            # Keep original text
+            continue
+        elif action == "tokenize":
+            # Replace with token
+            token = tokenize(original_text)
+            transformed = transformed[:start] + token + transformed[end:]
+            reasons.append(f"tokenized:{pii_type}")
+        elif action == "redact":
+            # Replace with placeholder
+            placeholder = f"[{pii_type.upper()}]"
+            transformed = transformed[:start] + placeholder + transformed[end:]
+            reasons.append(f"redacted:{pii_type}")
+        elif action == "deny":
+            # This should be handled at a higher level, but just redact here
+            placeholder = f"[{pii_type.upper()}]"
+            transformed = transformed[:start] + placeholder + transformed[end:]
+            reasons.append(f"redacted:{pii_type}")
+    
+    return transformed, reasons
+
+def _apply_default_action_dynamic(action: str, raw_text: str, now: int, direction: str, policy_config: Dict) -> Dict:
+    """Apply default action using dynamic configuration"""
+    
+    if action == "deny":
+        return {
+            "decision": "deny",
+            "reasons": [f"default.{direction}.deny"],
+            "policy_id": "defaults",
+            "ts": now
+        }
+    elif action == "pass_through":
+        return {
+            "decision": "allow",
+            "raw_text_out": raw_text,
+            "reasons": [f"default.{direction}.pass_through"],
+            "policy_id": "defaults",
+            "ts": now
+        }
+    elif action == "tokenize":
+        # Tokenize the entire text
+        tokenized_text = tokenize(raw_text)
+        return {
+            "decision": "transform",
+            "raw_text_out": tokenized_text,
+            "reasons": [f"default.{direction}.tokenize"],
+            "policy_id": "defaults",
+            "ts": now
+        }
+    
+    # PRECEDENCE LEVEL 4: Network scope redaction (net.* scopes or web.* tools)
+    network_scopes = policy_config.get("network_scopes", ["net."])
+    network_tools = policy_config.get("network_tools", ["web.", "http.", "fetch.", "request."])
+    
+    scope = policy_config.get("scope", "")
+    tool = policy_config.get("tool", "")
+    
+    if (scope and any(scope.startswith(ns) for ns in network_scopes)) or any(tool.startswith(nt) for nt in network_tools):
+        if USE_PRESIDIO and ANALYZER is not None:
+            redacted_text, reasons = anonymize_text_presidio(raw_text)
+        else:
+            redacted_text, reasons = anonymize_text_regex(raw_text)
+        reasons = sorted(list(reasons))
+        return {
+            "decision": "transform",
+            "raw_text_out": redacted_text,
+            "reasons": reasons or None,
+            "policy_id": "net-redact-presidio" if USE_PRESIDIO else "net-redact-regex",
+            "ts": now
+        }
+    
+    # PRECEDENCE LEVEL 5: Strict fallback (only block SSN and passwords)
+    return _apply_strict_fallback(raw_text, now)
+
+def _apply_strict_fallback(raw_text: str, now: int) -> Dict:
+    """Apply strict fallback policy - only block SSN and passwords"""
+    
+    # Only check for very strict PII types: SSN and passwords
+    strict_pii_findings = []
+    
+    if USE_PRESIDIO and ANALYZER is not None:
+        # Use Presidio to detect only SSN patterns (PASSWORD entity doesn't exist in Presidio)
+        results = ANALYZER.analyze(text=raw_text, entities=["US_SSN"], language="en")
+        for r in results:
+            if not is_false_positive(r.entity_type, "", raw_text):
+                strict_pii_findings.append({
+                    "type": f"PII:{r.entity_type.lower()}",
+                    "start": r.start,
+                    "end": r.end,
+                    "score": r.score,
+                    "text": raw_text[r.start:r.end]
+                })
+        
+        # Add password detection using regex even when Presidio is available
+        import re
+        password_pattern = r'\b(?:password|pwd|pass)\s*[:=]\s*\S+'
+        for match in re.finditer(password_pattern, raw_text, re.IGNORECASE):
+            # Check if this match overlaps with any SSN match
+            overlaps_with_ssn = False
+            for ssn_finding in strict_pii_findings:
+                if ssn_finding["type"] == "PII:us_ssn":
+                    # Check if password match overlaps with SSN match
+                    if not (match.end() <= ssn_finding["start"] or match.start() >= ssn_finding["end"]):
+                        overlaps_with_ssn = True
+                        break
+            
+            if not overlaps_with_ssn:
+                strict_pii_findings.append({
+                    "type": "PII:password",
+                    "start": match.start(),
+                    "end": match.end(),
+                    "score": 0.8,
+                    "text": match.group()
+                })
+    else:
+        # Fallback to regex for SSN and password detection
+        import re
+        
+        # SSN pattern (XXX-XX-XXXX)
+        ssn_pattern = r'\b\d{3}-\d{2}-\d{4}\b'
+        for match in re.finditer(ssn_pattern, raw_text):
+            strict_pii_findings.append({
+                "type": "PII:us_ssn",
+                "start": match.start(),
+                "end": match.end(),
+                "score": 0.9,
+                "text": match.group()
+            })
+        
+        # Password pattern (basic detection for "password:" or "pwd:")
+        password_pattern = r'\b(?:password|pwd|pass)\s*[:=]\s*\S+'
+        for match in re.finditer(password_pattern, raw_text, re.IGNORECASE):
+            # Check if this match overlaps with any SSN match
+            overlaps_with_ssn = False
+            for ssn_finding in strict_pii_findings:
+                if ssn_finding["type"] == "PII:us_ssn":
+                    # Check if password match overlaps with SSN match
+                    if not (match.end() <= ssn_finding["start"] or match.start() >= ssn_finding["end"]):
+                        overlaps_with_ssn = True
+                        break
+            
+            if not overlaps_with_ssn:
+                strict_pii_findings.append({
+                    "type": "PII:password",
+                    "start": match.start(),
+                    "end": match.end(),
+                    "score": 0.8,
+                    "text": match.group()
+                })
+    
+    if strict_pii_findings:
+        # Block the request if strict PII found
+        return {
+            "decision": "deny",
+            "reasons": [f"strict_pii_blocked:{finding['type']}" for finding in strict_pii_findings],
+            "policy_id": "strict-fallback",
+            "ts": now
+        }
+    else:
+        # Allow the request if no strict PII found
+        return {
+            "decision": "allow",
+            "raw_text_out": raw_text,
+            "reasons": ["strict_fallback.allow"],
+            "policy_id": "strict-fallback",
+            "ts": now
+        }

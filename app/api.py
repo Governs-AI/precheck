@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Response, Request
 from .models import PrePostCheckRequest, DecisionResponse
-from .policies import evaluate
+from .policies import evaluate, evaluate_with_payload_policy
 from .rate_limit import rate_limiter
 from .events import emit_event, get_webhook_config
 from .log import audit_log
@@ -185,7 +185,16 @@ async def precheck(
     start_ts = int(start_time)
     
     try:
-        result = evaluate(req.tool, req.scope, req.raw_text, start_ts, direction="ingress")
+        # Use new policy evaluation with payload policies
+        policy_config = req.policy_config.model_dump() if req.policy_config else None
+        result = evaluate_with_payload_policy(
+            tool=req.tool,
+            scope=req.scope,
+            raw_text=req.raw_text,
+            now=start_ts,
+            direction="ingress",
+            policy_config=policy_config
+        )
         
         # Metrics: Record policy evaluation
         policy_eval_duration = time.time() - start_time
@@ -291,7 +300,16 @@ async def postcheck(
     start_ts = int(start_time)
     
     try:
-        result = evaluate(req.tool, req.scope, req.raw_text, start_ts, direction="egress")
+        # Use new policy evaluation with payload policies
+        policy_config = req.policy_config.model_dump() if req.policy_config else None
+        result = evaluate_with_payload_policy(
+            tool=req.tool,
+            scope=req.scope,
+            raw_text=req.raw_text,
+            now=start_ts,
+            direction="egress",
+            policy_config=policy_config
+        )
         
         # Metrics: Record policy evaluation
         policy_eval_duration = time.time() - start_time
