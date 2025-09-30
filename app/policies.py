@@ -616,10 +616,22 @@ def _evaluate_dynamic_policy(
         
         # PRECEDENCE LEVEL 2: Tool-specific access rules
         tool_access = policy_config.get("tool_access", {})
+        
+        # Try exact match first
         if tool in tool_access:
             tool_policy = tool_access[tool]
-            if tool_policy.get("direction") == direction:
+            tool_direction = tool_policy.get("direction")
+            # Support "both" direction or exact match
+            if tool_direction == direction or tool_direction == "both":
                 return _apply_tool_specific_policy_dynamic(tool, raw_text, now, tool_policy)
+        
+        # Try partial matching for MCP tools (e.g., "mcp.weather.current" matches "weather.current")
+        for policy_tool, tool_policy in tool_access.items():
+            if tool.endswith("." + policy_tool) or tool.endswith(policy_tool):
+                tool_direction = tool_policy.get("direction")
+                # Support "both" direction or exact match
+                if tool_direction == direction or tool_direction == "both":
+                    return _apply_tool_specific_policy_dynamic(tool, raw_text, now, tool_policy)
         
         # PRECEDENCE LEVEL 3: Global defaults for this direction
         defaults = policy_config.get("defaults", {})
@@ -709,10 +721,10 @@ def _apply_tool_specific_policy_dynamic(tool: str, raw_text: str, now: int, tool
     else:
         # No PII found, check if tool has default action override
         action = tool_policy.get("action")
-        if action == "deny":
+        if action == "deny" or action == "block":
             return {
                 "decision": "deny",
-                "reasons": ["tool-specific.deny"],
+                "reasons": ["tool-specific.block"],
                 "policy_id": "tool-access",
                 "ts": now
             }
