@@ -185,6 +185,20 @@ async def precheck(
     start_ts = int(start_time)
     
     try:
+        # DEBUG: Print entire request payload for debugging
+        print("=" * 80)
+        print("🔍 PRECHECK REQUEST DEBUG")
+        print("=" * 80)
+        print(f"User ID: {user_id}")
+        print(f"Tool: {req.tool}")
+        print(f"Scope: {req.scope}")
+        print(f"Raw Text: {req.raw_text}")
+        print(f"Correlation ID: {req.corr_id}")
+        print(f"Tags: {req.tags}")
+        print(f"Policy Config: {req.policy_config.model_dump() if req.policy_config else None}")
+        print(f"Tool Config: {req.tool_config.model_dump() if req.tool_config else None}")
+        print("=" * 80)
+        
         # Use new policy evaluation with payload policies
         policy_config = req.policy_config.model_dump() if req.policy_config else None
         result = evaluate_with_payload_policy(
@@ -195,6 +209,15 @@ async def precheck(
             direction="ingress",
             policy_config=policy_config
         )
+        
+        # DEBUG: Print policy evaluation result
+        print("🔍 POLICY EVALUATION RESULT")
+        print("-" * 40)
+        print(f"Decision: {result['decision']}")
+        print(f"Policy ID: {result.get('policy_id', 'unknown')}")
+        print(f"Reasons: {result.get('reasons', [])}")
+        print(f"Raw Text Out: {result.get('raw_text_out', 'N/A')}")
+        print("-" * 40)
         
         # Metrics: Record policy evaluation
         policy_eval_duration = time.time() - start_time
@@ -300,6 +323,20 @@ async def postcheck(
     start_ts = int(start_time)
     
     try:
+        # DEBUG: Print entire request payload for debugging
+        print("=" * 80)
+        print("🔍 POSTCHECK REQUEST DEBUG")
+        print("=" * 80)
+        print(f"User ID: {user_id}")
+        print(f"Tool: {req.tool}")
+        print(f"Scope: {req.scope}")
+        print(f"Raw Text: {req.raw_text}")
+        print(f"Correlation ID: {req.corr_id}")
+        print(f"Tags: {req.tags}")
+        print(f"Policy Config: {req.policy_config.model_dump() if req.policy_config else None}")
+        print(f"Tool Config: {req.tool_config.model_dump() if req.tool_config else None}")
+        print("=" * 80)
+        
         # Use new policy evaluation with payload policies
         policy_config = req.policy_config.model_dump() if req.policy_config else None
         result = evaluate_with_payload_policy(
@@ -310,6 +347,15 @@ async def postcheck(
             direction="egress",
             policy_config=policy_config
         )
+        
+        # DEBUG: Print policy evaluation result
+        print("🔍 POLICY EVALUATION RESULT")
+        print("-" * 40)
+        print(f"Decision: {result['decision']}")
+        print(f"Policy ID: {result.get('policy_id', 'unknown')}")
+        print(f"Reasons: {result.get('reasons', [])}")
+        print(f"Raw Text Out: {result.get('raw_text_out', 'N/A')}")
+        print("-" * 40)
         
         # Metrics: Record policy evaluation
         policy_eval_duration = time.time() - start_time

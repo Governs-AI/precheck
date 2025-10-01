@@ -16,7 +16,7 @@ GovernsAI Precheck is a policy evaluation and PII redaction service that provide
 
 ### 2. Per-Tool PII Access Control
 - **Tool-specific allowlists**: Configure which PII types each tool can access
-- **Transform actions**: Support for `pass_through`, `tokenize`, and default redaction
+- **Transform actions**: Support for `pass_through`, `tokenize`, `confirm`, and default redaction
 - **Stable tokenization**: HMAC-based consistent token generation
 - **Dynamic policy configuration**: Policies sent in request payload for real-time updates
 - **Backward compatibility**: Falls back to strict PII blocking (SSN and passwords only) when no payload provided
@@ -117,6 +117,14 @@ The complete API specification is available in OpenAPI 3.1.0 format:
 - **Interactive Docs**: `http://localhost:8080/docs` (Swagger UI)
 - **Alternative Docs**: `http://localhost:8080/redoc` (ReDoc)
 - **Schema**: `http://localhost:8080/openapi.json` (JSON schema)
+
+### Decision Types
+The precheck service returns one of four decision types:
+
+- **`allow`**: Tool execution is permitted without modification
+- **`deny`**: Tool execution is blocked (e.g., dangerous tools, policy violations)
+- **`transform`**: Tool execution is permitted but text is modified (e.g., PII redaction, tokenization)
+- **`confirm`**: User confirmation is required before tool execution (e.g., sensitive operations)
 
 ### Policy Precedence in API Responses
 All API responses include a `policy_id` field that indicates which precedence level was applied:
@@ -398,7 +406,7 @@ Every policy decision emits a webhook event with the following schema:
 #### Data Fields
 - **`orgId`**: Organization identifier (configurable via `ORG_ID` environment variable)
 - **`direction`**: `"precheck"` for ingress, `"postcheck"` for egress
-- **`decision`**: Policy decision (`allow`, `deny`, `transform`)
+- **`decision`**: Policy decision (`allow`, `deny`, `transform`, `confirm`)
 - **`tool`**: Tool name from the request
 - **`scope`**: Network scope from the request
 - **`rawText`**: Original raw text input from the request

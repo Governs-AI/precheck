@@ -49,7 +49,7 @@ class PrePostCheckRequest(BaseModel):
     tool_config: Optional[ToolConfig] = None
 
 class DecisionResponse(BaseModel):
-    decision: str  # allow | deny | transform
+    decision: str  # allow | deny | transform | confirm
     raw_text_out: str  # Processed text with redundant values at place
     reasons: Optional[List[str]] = None
     policy_id: Optional[str] = None

@@ -737,6 +737,14 @@ def _apply_tool_specific_policy_dynamic(tool: str, raw_text: str, now: int, tool
                 "policy_id": "tool-access",
                 "ts": now
             }
+        elif action == "confirm":
+            return {
+                "decision": "confirm",
+                "raw_text_out": raw_text,
+                "reasons": ["tool-specific.confirm"],
+                "policy_id": "tool-access",
+                "ts": now
+            }
         else:
             # Default: pass through
             return {
