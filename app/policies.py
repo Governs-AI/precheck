@@ -417,6 +417,7 @@ def evaluate(tool: str, scope: Optional[str], raw_text: str, now: int, direction
         if error_behavior == "block":
             return {
                 "decision": "deny",
+                "raw_text_out": raw_text,
                 "reasons": ["precheck.error"],
                 "policy_id": "error-handler",
                 "ts": now
@@ -456,6 +457,7 @@ def evaluate(tool: str, scope: Optional[str], raw_text: str, now: int, direction
             # Default to block
             return {
                 "decision": "deny",
+                "raw_text_out": raw_text,
                 "reasons": ["precheck.error"],
                 "policy_id": "error-handler",
                 "ts": now
@@ -579,7 +581,10 @@ def evaluate_with_payload_policy(
     raw_text: str, 
     now: int, 
     direction: str = "ingress",
-    policy_config: Optional[Dict] = None
+    policy_config: Optional[Dict] = None,
+    tool_config: Optional[Dict] = None,
+    user_id: Optional[str] = None,
+    budget_context: Optional[Dict] = None
 ) -> Dict:
     """
     Evaluate policy using payload-provided configuration
@@ -591,7 +596,7 @@ def evaluate_with_payload_policy(
         return evaluate(tool, scope, raw_text, now, direction)
     
     # Use payload-provided policy configuration
-    return _evaluate_dynamic_policy(tool, scope, raw_text, now, direction, policy_config)
+    return _evaluate_dynamic_policy(tool, scope, raw_text, now, direction, policy_config, tool_config, user_id, budget_context)
 
 def _evaluate_dynamic_policy(
     tool: str, 
@@ -599,7 +604,10 @@ def _evaluate_dynamic_policy(
     raw_text: str, 
     now: int, 
     direction: str,
-    policy_config: Dict
+    policy_config: Dict,
+    tool_config: Optional[Dict] = None,
+    user_id: Optional[str] = None,
+    budget_context: Optional[Dict] = None
 ) -> Dict:
     """Evaluate policy using dynamic configuration from payload"""
     
@@ -609,6 +617,7 @@ def _evaluate_dynamic_policy(
         if tool in deny_tools:
             return {
                 "decision": "deny",
+                "raw_text_out": raw_text,
                 "reasons": ["blocked tool: code/exec"],
                 "policy_id": "deny-exec",
                 "ts": now
@@ -623,7 +632,7 @@ def _evaluate_dynamic_policy(
             tool_direction = tool_policy.get("direction")
             # Support "both" direction or exact match
             if tool_direction == direction or tool_direction == "both":
-                return _apply_tool_specific_policy_dynamic(tool, raw_text, now, tool_policy)
+                return _apply_tool_specific_policy_dynamic(tool, raw_text, now, tool_policy, user_id, tool_config, policy_config, budget_context)
         
         # Try partial matching for MCP tools (e.g., "mcp.weather.current" matches "weather.current")
         for policy_tool, tool_policy in tool_access.items():
@@ -631,7 +640,7 @@ def _evaluate_dynamic_policy(
                 tool_direction = tool_policy.get("direction")
                 # Support "both" direction or exact match
                 if tool_direction == direction or tool_direction == "both":
-                    return _apply_tool_specific_policy_dynamic(tool, raw_text, now, tool_policy)
+                    return _apply_tool_specific_policy_dynamic(tool, raw_text, now, tool_policy, user_id, tool_config, policy_config, budget_context)
         
         # PRECEDENCE LEVEL 3: Global defaults for this direction
         defaults = policy_config.get("defaults", {})
@@ -645,6 +654,7 @@ def _evaluate_dynamic_policy(
         if error_behavior == "block":
             return {
                 "decision": "deny",
+                "raw_text_out": raw_text,
                 "reasons": ["precheck.error"],
                 "policy_id": "error-handler",
                 "ts": now
@@ -685,12 +695,13 @@ def _evaluate_dynamic_policy(
             # Default to block
             return {
                 "decision": "deny",
+                "raw_text_out": raw_text,
                 "reasons": ["precheck.error"],
                 "policy_id": "error-handler",
                 "ts": now
             }
 
-def _apply_tool_specific_policy_dynamic(tool: str, raw_text: str, now: int, tool_policy: Dict) -> Dict:
+def _apply_tool_specific_policy_dynamic(tool: str, raw_text: str, now: int, tool_policy: Dict, user_id: Optional[str] = None, tool_config: Optional[Dict] = None, policy_config: Optional[Dict] = None, budget_context: Optional[Dict] = None) -> Dict:
     """Apply tool-specific policy using dynamic configuration"""
     
     # Run PII detection on raw text
@@ -722,8 +733,10 @@ def _apply_tool_specific_policy_dynamic(tool: str, raw_text: str, now: int, tool
         # No PII found, check if tool has default action override
         action = tool_policy.get("action")
         if action == "deny" or action == "block":
+            # Budget check not needed for deny/block actions
             return {
                 "decision": "deny",
+                "raw_text_out": raw_text,
                 "reasons": ["tool-specific.block"],
                 "policy_id": "tool-access",
                 "ts": now
@@ -738,21 +751,45 @@ def _apply_tool_specific_policy_dynamic(tool: str, raw_text: str, now: int, tool
                 "ts": now
             }
         elif action == "confirm":
-            return {
+            # Check budget first - budget overrides confirm
+            if user_id and tool_config and policy_config and budget_context:
+                budget_result = _check_budget_and_apply(user_id, tool, raw_text, tool_config, policy_config, budget_context, now)
+                if budget_result:
+                    return budget_result
+            
+            # If budget check passed, return confirm
+            result = {
                 "decision": "confirm",
                 "raw_text_out": raw_text,
                 "reasons": ["tool-specific.confirm"],
                 "policy_id": "tool-access",
                 "ts": now
             }
+            
+            # Add budget info if available
+            if user_id and tool_config and policy_config and budget_context:
+                result = _add_budget_info_to_result(result, user_id, tool, raw_text, tool_config, policy_config, budget_context)
+            
+            return result
         else:
-            # Default: pass through
-            return {
+            # Default: pass through - but check budget first if user_id provided
+            result = {
                 "decision": "allow",
                 "raw_text_out": raw_text,
                 "policy_id": "tool-access",
                 "ts": now
             }
+            
+            # Check budget if user_id and tool_config provided
+            if user_id and tool_config and policy_config and budget_context:
+                budget_result = _check_budget_and_apply(user_id, tool, raw_text, tool_config, policy_config, budget_context, now)
+                if budget_result:
+                    return budget_result
+                else:
+                    # Add budget info to the result
+                    result = _add_budget_info_to_result(result, user_id, tool, raw_text, tool_config, policy_config, budget_context)
+            
+            return result
 
 def apply_tool_access_text_dynamic(tool: str, findings: List[Dict], raw_text: str, allow_pii: Dict[str, str]) -> Tuple[str, List[str]]:
     """Apply tool-specific text transformations using dynamic allow_pii rules"""
@@ -799,6 +836,7 @@ def _apply_default_action_dynamic(action: str, raw_text: str, now: int, directio
     if action == "deny":
         return {
             "decision": "deny",
+            "raw_text_out": raw_text,
             "reasons": [f"default.{direction}.deny"],
             "policy_id": "defaults",
             "ts": now
@@ -842,14 +880,14 @@ def _apply_default_action_dynamic(action: str, raw_text: str, now: int, directio
             "policy_id": "net-redact-presidio" if USE_PRESIDIO else "net-redact-regex",
             "ts": now
         }
-    
+
     # PRECEDENCE LEVEL 5: Strict fallback (only block SSN and passwords)
     return _apply_strict_fallback(raw_text, now)
 
 def _apply_strict_fallback(raw_text: str, now: int) -> Dict:
-    """Apply strict fallback policy - only block SSN and passwords"""
+    """Apply strict fallback policy - block SSN, passwords, and payment amounts"""
     
-    # Only check for very strict PII types: SSN and passwords
+    # Check for very strict PII types: SSN, passwords, and payment amounts
     strict_pii_findings = []
     
     if USE_PRESIDIO and ANALYZER is not None:
@@ -884,6 +922,25 @@ def _apply_strict_fallback(raw_text: str, now: int) -> Dict:
                     "start": match.start(),
                     "end": match.end(),
                     "score": 0.8,
+                    "text": match.group()
+                })
+        
+        # Add payment amount detection
+        payment_pattern = r'\$\d+(?:\.\d{2})?|\b\d+(?:\.\d{2})?\s*(?:dollars?|USD|usd)\b|"(?:amount|price|cost)":\s*"?\d+(?:\.\d{2})?"?'
+        for match in re.finditer(payment_pattern, raw_text, re.IGNORECASE):
+            # Check if this match overlaps with any existing findings
+            overlaps = False
+            for finding in strict_pii_findings:
+                if not (match.end() <= finding["start"] or match.start() >= finding["end"]):
+                    overlaps = True
+                    break
+            
+            if not overlaps:
+                strict_pii_findings.append({
+                    "type": "PII:payment_amount",
+                    "start": match.start(),
+                    "end": match.end(),
+                    "score": 0.9,
                     "text": match.group()
                 })
     else:
@@ -921,11 +978,31 @@ def _apply_strict_fallback(raw_text: str, now: int) -> Dict:
                     "score": 0.8,
                     "text": match.group()
                 })
+        
+        # Payment amount pattern
+        payment_pattern = r'\$\d+(?:\.\d{2})?|\b\d+(?:\.\d{2})?\s*(?:dollars?|USD|usd)\b|"(?:amount|price|cost)":\s*"?\d+(?:\.\d{2})?"?'
+        for match in re.finditer(payment_pattern, raw_text, re.IGNORECASE):
+            # Check if this match overlaps with any existing findings
+            overlaps = False
+            for finding in strict_pii_findings:
+                if not (match.end() <= finding["start"] or match.start() >= finding["end"]):
+                    overlaps = True
+                    break
+            
+            if not overlaps:
+                strict_pii_findings.append({
+                    "type": "PII:payment_amount",
+                    "start": match.start(),
+                    "end": match.end(),
+                    "score": 0.9,
+                    "text": match.group()
+                })
     
     if strict_pii_findings:
         # Block the request if strict PII found
         return {
             "decision": "deny",
+            "raw_text_out": raw_text,  # Include original text even when denying
             "reasons": [f"strict_pii_blocked:{finding['type']}" for finding in strict_pii_findings],
             "policy_id": "strict-fallback",
             "ts": now
@@ -939,3 +1016,126 @@ def _apply_strict_fallback(raw_text: str, now: int) -> Dict:
             "policy_id": "strict-fallback",
             "ts": now
         }
+
+def _check_budget_and_apply(
+    user_id: str, 
+    tool: str, 
+    raw_text: str, 
+    tool_config: Dict, 
+    policy_config: Dict, 
+    budget_context: Optional[Dict],
+    now: int
+) -> Optional[Dict]:
+    """Check budget and apply budget-based decisions"""
+    
+    try:
+        from .budget import (
+            estimate_request_cost, 
+            get_purchase_amount, 
+            check_budget_with_context,
+            update_budget_after_decision
+        )
+        
+        # Only check budget if budget_context is provided
+        if not budget_context:
+            return None
+        
+        # Get model from policy config or tool config
+        model = policy_config.get("model", "gpt-4")
+        if tool_config and "metadata" in tool_config:
+            model = tool_config["metadata"].get("model", model)
+        
+        # Estimate costs
+        estimated_llm_cost = estimate_request_cost(raw_text, model)
+        estimated_purchase = get_purchase_amount(tool_config)
+        
+        # Only check budget if there's a purchase amount or if LLM cost is significant
+        if estimated_purchase is None and estimated_llm_cost < 0.01:
+            # No significant cost - just add budget info without blocking
+            return None
+        
+        # Check budget using context from request
+        budget_status, budget_info = check_budget_with_context(budget_context, estimated_llm_cost, estimated_purchase)
+        
+        # Determine decision based on budget
+        if not budget_status.allowed:
+            # Budget exceeded - deny the request
+            return {
+                "decision": "deny",
+                "raw_text_out": raw_text,
+                "reasons": ["budget_exceeded"],
+                "policy_id": "budget-check",
+                "ts": now,
+                "budget_status": budget_status,
+                "budget_info": budget_info
+            }
+        elif budget_status.reason == "budget_warning":
+            # Budget warning - require confirmation
+            return {
+                "decision": "confirm",
+                "raw_text_out": raw_text,
+                "reasons": ["budget_warning"],
+                "policy_id": "budget-check",
+                "ts": now,
+                "budget_status": budget_status,
+                "budget_info": budget_info
+            }
+        else:
+            # Budget OK - allow but include budget info
+            # Note: We don't return here, let the normal policy flow continue
+            # The budget info will be added to the final result
+            return None
+            
+    except Exception as e:
+        # If budget checking fails, log error but don't block the request
+        print(f"Budget check failed: {e}")
+        return None
+
+def _add_budget_info_to_result(result: Dict, user_id: str, tool: str, raw_text: str, tool_config: Dict, policy_config: Dict, budget_context: Optional[Dict]) -> Dict:
+    """Add budget information to policy evaluation result"""
+    
+    try:
+        from .budget import estimate_request_cost, get_purchase_amount, check_budget_with_context
+        
+        # Only add budget info if budget_context is provided
+        if not budget_context:
+            return result
+        
+        # Get model from policy config or tool config
+        model = policy_config.get("model", "gpt-4")
+        if tool_config and "metadata" in tool_config:
+            model = tool_config["metadata"].get("model", model)
+        
+        # Estimate costs
+        estimated_llm_cost = estimate_request_cost(raw_text, model)
+        estimated_purchase = get_purchase_amount(tool_config)
+        
+        # Only add budget info if there's a purchase amount or if LLM cost is significant
+        if estimated_purchase is None and estimated_llm_cost < 0.01:
+            # No significant cost - return result without budget info
+            return result
+        
+        # Check budget using context from request
+        budget_status, budget_info = check_budget_with_context(budget_context, estimated_llm_cost, estimated_purchase)
+        
+        # Add budget info to result
+        result["budget_status"] = budget_status
+        result["budget_info"] = budget_info
+        
+        # Add budget-related reasons
+        if "reasons" not in result:
+            result["reasons"] = []
+        
+        if budget_status.reason == "budget_ok":
+            result["reasons"].append("budget_check_passed")
+        elif budget_status.reason == "budget_warning":
+            result["reasons"].append("budget_warning")
+        elif budget_status.reason == "budget_exceeded":
+            result["reasons"].append("budget_exceeded")
+        
+        return result
+        
+    except Exception as e:
+        # If budget checking fails, return result without budget info
+        print(f"Failed to add budget info: {e}")
+        return result

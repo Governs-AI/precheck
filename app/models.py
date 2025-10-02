@@ -29,6 +29,9 @@ class PolicyConfig(BaseModel):
     
     # Error handling behavior
     on_error: str = "block"  # block | pass | best_effort
+    
+    # Model information for cost estimation
+    model: str = "gpt-4"
 
 class ToolConfig(BaseModel):
     """Tool-specific configuration"""
@@ -36,6 +39,15 @@ class ToolConfig(BaseModel):
     scope: Optional[str] = None
     direction: str  # "ingress" or "egress"
     metadata: Dict[str, Any] = {}  # Additional tool metadata
+
+class BudgetContext(BaseModel):
+    """Budget context information from agent"""
+    monthly_limit: float
+    current_spend: float
+    llm_spend: float
+    purchase_spend: float
+    remaining_budget: float
+    budget_type: str  # "user" or "organization"
 
 class PrePostCheckRequest(BaseModel):
     tool: str
@@ -47,6 +59,29 @@ class PrePostCheckRequest(BaseModel):
     # NEW: Policy and tool configuration from agent
     policy_config: Optional[PolicyConfig] = None
     tool_config: Optional[ToolConfig] = None
+    budget_context: Optional[BudgetContext] = None
+
+class BudgetStatus(BaseModel):
+    """Budget status information"""
+    allowed: bool
+    currentSpend: float
+    limit: float
+    remaining: float
+    percentUsed: float
+    reason: str
+
+class BudgetInfo(BaseModel):
+    """Detailed budget information"""
+    monthly_limit: float
+    current_spend: float
+    llm_spend: float
+    purchase_spend: float
+    remaining_budget: float
+    estimated_cost: float
+    estimated_purchase: Optional[float] = None
+    projected_total: float
+    percent_used: float
+    budget_type: str  # "user" or "organization"
 
 class DecisionResponse(BaseModel):
     decision: str  # allow | deny | transform | confirm
@@ -54,6 +89,8 @@ class DecisionResponse(BaseModel):
     reasons: Optional[List[str]] = None
     policy_id: Optional[str] = None
     ts: int
+    budget_status: Optional[BudgetStatus] = None
+    budget_info: Optional[BudgetInfo] = None
 
 # Legacy models for backward compatibility
 PrecheckReq = PrePostCheckRequest

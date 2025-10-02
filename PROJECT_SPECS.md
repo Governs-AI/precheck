@@ -43,7 +43,15 @@ GovernsAI Precheck is a policy evaluation and PII redaction service that provide
 - **Provable governance**: Complete audit trail without database dependency
 - **Log shipping ready**: Compatible with Loki/Datadog ingestion
 
-### 7. Policy Hot-Reload
+### 7. Budget Management & Cost Control
+- **Real-time budget tracking**: Track LLM and purchase costs per user
+- **Cost estimation**: Automatic cost estimation based on model and text length
+- **Budget enforcement**: Block requests that exceed budget limits
+- **Purchase detection**: Extract purchase amounts from tool metadata
+- **Budget warnings**: Require confirmation when approaching budget limits
+- **Monthly budget reset**: Automatic budget reset at month boundaries
+
+### 8. Policy Hot-Reload
 - **Live policy updates**: Reload policies without service restart
 - **File change detection**: Automatic reload when policy file is modified
 - **Global defaults**: Organization-wide policy stance configuration
@@ -651,6 +659,169 @@ graph TD
     H --> J
     I --> J
 ```
+
+## Budget Management
+
+### Overview
+The precheck service includes comprehensive budget management to track and control costs for both LLM usage and purchases. Budget tracking is integrated into the policy evaluation process and can block or warn about requests that exceed budget limits.
+
+### Budget Features
+
+#### 1. Cost Estimation
+- **LLM Cost Estimation**: Automatic cost calculation based on model type and text length
+- **Purchase Detection**: Extract purchase amounts from tool metadata fields
+- **Model Support**: Support for major LLM providers (GPT-4, Claude, etc.)
+- **Token Estimation**: Rough token estimation based on text character count
+
+#### 2. Budget Tracking
+- **User-level Budgets**: Individual budget limits per user
+- **Monthly Reset**: Automatic budget reset at month boundaries
+- **Dual Tracking**: Separate tracking for LLM costs and purchase costs
+- **Transaction History**: Complete audit trail of all budget transactions
+
+#### 3. Budget Enforcement
+- **Hard Limits**: Block requests that would exceed budget
+- **Warning Thresholds**: Require confirmation when approaching budget limits
+- **Graceful Degradation**: Fallback behavior when budget checking fails
+
+### Budget Database Schema
+
+#### Budget Table
+```sql
+CREATE TABLE budgets (
+    user_id VARCHAR PRIMARY KEY,
+    monthly_limit FLOAT DEFAULT 10.0,
+    current_spend FLOAT DEFAULT 0.0,
+    llm_spend FLOAT DEFAULT 0.0,
+    purchase_spend FLOAT DEFAULT 0.0,
+    budget_type VARCHAR DEFAULT 'user',
+    last_reset DATETIME DEFAULT CURRENT_TIMESTAMP,
+    is_active BOOLEAN DEFAULT TRUE
+);
+```
+
+#### Budget Transactions Table
+```sql
+CREATE TABLE budget_transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id VARCHAR NOT NULL,
+    transaction_type VARCHAR NOT NULL,  -- 'llm' or 'purchase'
+    amount FLOAT NOT NULL,
+    description VARCHAR,
+    tool VARCHAR,
+    correlation_id VARCHAR,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### Enhanced Request Format
+
+The precheck service now accepts enhanced request formats with budget information:
+
+```json
+{
+  "tool": "weather.current",
+  "raw_text": "Get weather for Berlin",
+  "scope": "precheck",
+  "corr_id": "unique_id",
+  "tool_config": {
+    "tool_name": "weather.current",
+    "scope": "net.external",
+    "direction": "ingress",
+    "metadata": {
+      "purchase_amount": 25.99,
+      "amount": 25.99,
+      "price": 25.99,
+      "cost": 25.99,
+      "vendor": "Shopify",
+      "category": "software",
+      "description": "Premium plan upgrade",
+      "currency": "USD",
+      "model": "gpt-4"
+    }
+  },
+  "policy_config": {
+    "version": "v1",
+    "model": "gpt-4",
+    "defaults": {
+      "ingress": {"action": "redact"},
+      "egress": {"action": "redact"}
+    },
+    "tool_access": {
+      "weather.current": {
+        "direction": "both",
+        "action": "allow"
+      }
+    },
+    "deny_tools": ["python.exec", "bash.exec"],
+    "on_error": "block"
+  }
+}
+```
+
+### Enhanced Response Format
+
+The precheck service now returns enhanced responses with budget information:
+
+```json
+{
+  "decision": "allow",
+  "raw_text_out": "processed_text",
+  "reasons": ["budget_check_passed"],
+  "policy_id": "tool-access",
+  "ts": 1234567890,
+  "budget_status": {
+    "allowed": true,
+    "currentSpend": 3.50,
+    "limit": 10.00,
+    "remaining": 6.50,
+    "percentUsed": 35.0,
+    "reason": "budget_ok"
+  },
+  "budget_info": {
+    "monthly_limit": 10.00,
+    "current_spend": 3.50,
+    "llm_spend": 2.00,
+    "purchase_spend": 1.50,
+    "remaining_budget": 6.50,
+    "estimated_cost": 0.05,
+    "estimated_purchase": 25.99,
+    "projected_total": 29.54,
+    "percent_used": 35.0,
+    "budget_type": "user"
+  }
+}
+```
+
+### Budget Decision Types
+
+The budget system can return three types of decisions:
+
+1. **`allow`**: Budget is within limits, request can proceed
+2. **`confirm`**: Budget warning - user confirmation required
+3. **`deny`**: Budget exceeded - request blocked
+
+### Cost Estimation Models
+
+The service supports cost estimation for major LLM providers:
+
+| Model | Input Cost (per token) | Output Cost (per token) |
+|-------|------------------------|-------------------------|
+| GPT-4 | $0.00003 | $0.00006 |
+| GPT-4 Turbo | $0.00001 | $0.00003 |
+| GPT-3.5 Turbo | $0.0000015 | $0.000002 |
+| Claude-3 Opus | $0.000015 | $0.000075 |
+| Claude-3 Sonnet | $0.000003 | $0.000015 |
+| Claude-3 Haiku | $0.00000025 | $0.00000125 |
+
+### Budget Configuration
+
+Budget limits can be configured per user:
+
+- **Default Monthly Limit**: $10.00
+- **Budget Type**: `user` or `organization`
+- **Reset Schedule**: Monthly (automatic)
+- **Warning Threshold**: 90% of budget used
 
 ## Configuration
 

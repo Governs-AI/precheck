@@ -197,18 +197,29 @@ async def precheck(
         print(f"Tags: {req.tags}")
         print(f"Policy Config: {req.policy_config.model_dump() if req.policy_config else None}")
         print(f"Tool Config: {req.tool_config.model_dump() if req.tool_config else None}")
+        print(f"Budget Context: {req.budget_context.model_dump() if req.budget_context else None}")
         print("=" * 80)
         
         # Use new policy evaluation with payload policies
         policy_config = req.policy_config.model_dump() if req.policy_config else None
+        tool_config = req.tool_config.model_dump() if req.tool_config else None
+        budget_context = req.budget_context.model_dump() if req.budget_context else None
         result = evaluate_with_payload_policy(
             tool=req.tool,
             scope=req.scope,
             raw_text=req.raw_text,
             now=start_ts,
             direction="ingress",
-            policy_config=policy_config
+            policy_config=policy_config,
+            tool_config=tool_config,
+            user_id=user_id,
+            budget_context=budget_context
         )
+        
+        # Add budget info to result if not already present
+        if user_id and tool_config and policy_config and budget_context:
+            from .policies import _add_budget_info_to_result
+            result = _add_budget_info_to_result(result, user_id, req.tool, req.raw_text, tool_config, policy_config, budget_context)
         
         # DEBUG: Print policy evaluation result
         print("🔍 POLICY EVALUATION RESULT")
@@ -339,14 +350,24 @@ async def postcheck(
         
         # Use new policy evaluation with payload policies
         policy_config = req.policy_config.model_dump() if req.policy_config else None
+        tool_config = req.tool_config.model_dump() if req.tool_config else None
+        budget_context = req.budget_context.model_dump() if req.budget_context else None
         result = evaluate_with_payload_policy(
             tool=req.tool,
             scope=req.scope,
             raw_text=req.raw_text,
             now=start_ts,
             direction="egress",
-            policy_config=policy_config
+            policy_config=policy_config,
+            tool_config=tool_config,
+            user_id=user_id,
+            budget_context=budget_context
         )
+        
+        # Add budget info to result if not already present
+        if user_id and tool_config and policy_config and budget_context:
+            from .policies import _add_budget_info_to_result
+            result = _add_budget_info_to_result(result, user_id, req.tool, req.raw_text, tool_config, policy_config, budget_context)
         
         # DEBUG: Print policy evaluation result
         print("🔍 POLICY EVALUATION RESULT")
