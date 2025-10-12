@@ -199,6 +199,10 @@ def is_false_positive(entity_type: str, field_name: str, value: str) -> bool:
     if entity_type == "US_SSN" and is_password_field(field_name):
         return True
     
+    # If the detected text is "password" or similar, it's likely a false positive for SSN
+    if entity_type == "US_SSN" and value.lower() in ["password", "pwd", "pass"]:
+        return True
+    
     # Common false positive patterns - be more conservative
     if entity_type == "US_SSN" and len(value) == 9 and value.isdigit():
         # Only filter out obvious non-SSN patterns
@@ -315,6 +319,44 @@ def set_jsonpath(obj: Any, path: str, value: Any) -> None:
     if isinstance(current, dict):
         current[parts[-1]] = value
 
+def apply_tool_access_text(tool_name: str, findings: List[Dict], raw_text: str) -> Tuple[str, List[str]]:
+    """Apply tool-specific PII access rules to raw text"""
+    policy = get_policy()
+    tool_access = policy.get("tool_access", {})
+    
+    cfg = tool_access.get(tool_name, {})
+    allow_map = cfg.get("allow_pii", {})
+    
+    transformed_text = raw_text
+    reasons = []
+    
+    # Process findings in reverse order to maintain correct indices
+    for f in sorted(findings, key=lambda x: x["start"], reverse=True):
+        pii_type = f.get("type", "")  # e.g., "PII:email_address"
+        start = f.get("start", 0)
+        end = f.get("end", 0)
+        original_text = f.get("text", "")
+        
+        action = allow_map.get(pii_type)
+        
+        if action == "pass_through":
+            reasons.append(f"pii.allowed:{pii_type}")
+            continue
+        elif action == "tokenize":
+            tokenized_value = tokenize(original_text)
+            transformed_text = transformed_text[:start] + tokenized_value + transformed_text[end:]
+            reasons.append(f"pii.tokenized:{pii_type}")
+        else:
+            # Fall back to default redaction (mask/remove)
+            if USE_PRESIDIO and ANALYZER is not None:
+                redacted, _ = anonymize_text_presidio(original_text)
+            else:
+                redacted, _ = anonymize_text_regex(original_text)
+            transformed_text = transformed_text[:start] + redacted + transformed_text[end:]
+            reasons.append(f"pii.redacted:{pii_type}")
+    
+    return transformed_text, reasons
+
 def apply_tool_access(tool_name: str, findings: List[Dict], payload_dict: Dict) -> Tuple[Dict, List[str]]:
     """Apply tool-specific PII access rules"""
     policy = get_policy()
@@ -363,10 +405,10 @@ DENY_TOOLS = {"python.exec", "bash.exec", "code.exec", "shell.exec"}
 NET_SCOPES = ("net.",)
 NET_TOOLS_PREFIX = ("web.", "http.", "fetch.", "request.")
 
-def evaluate(tool: str, scope: Optional[str], payload: Dict, now: int, direction: str = "ingress") -> Dict:
+def evaluate(tool: str, scope: Optional[str], raw_text: str, now: int, direction: str = "ingress") -> Dict:
     """Evaluate policy and return decision with optional payload transformation"""
     try:
-        return _evaluate_policy(tool, scope, payload, now, direction)
+        return _evaluate_policy(tool, scope, raw_text, now, direction)
     except Exception as e:
         # Handle errors based on ON_ERROR setting
         from .settings import settings
@@ -375,6 +417,7 @@ def evaluate(tool: str, scope: Optional[str], payload: Dict, now: int, direction
         if error_behavior == "block":
             return {
                 "decision": "deny",
+                "raw_text_out": raw_text,
                 "reasons": ["precheck.error"],
                 "policy_id": "error-handler",
                 "ts": now
@@ -389,25 +432,23 @@ def evaluate(tool: str, scope: Optional[str], payload: Dict, now: int, direction
         elif error_behavior == "best_effort":
             # Try regex fallback, else tokenize everything blindly
             try:
-                new_payload, reasons = redact_obj(payload)
+                if USE_PRESIDIO and ANALYZER is not None:
+                    redacted_text, reasons = anonymize_text_presidio(raw_text)
+                else:
+                    redacted_text, reasons = anonymize_text_regex(raw_text)
                 return {
                     "decision": "transform",
-                    "payload_out": new_payload,
+                    "raw_text_out": redacted_text,
                     "reasons": reasons or ["precheck.best_effort"],
                     "policy_id": "error-handler-regex",
                     "ts": now
                 }
             except Exception:
                 # Last resort: tokenize everything
-                transformed = {}
-                for key, value in payload.items():
-                    if isinstance(value, str):
-                        transformed[key] = tokenize(value)
-                    else:
-                        transformed[key] = value
+                tokenized_text = tokenize(raw_text)
                 return {
                     "decision": "transform",
-                    "payload_out": transformed,
+                    "raw_text_out": tokenized_text,
                     "reasons": ["precheck.best_effort_tokenize"],
                     "policy_id": "error-handler-tokenize",
                     "ts": now
@@ -416,14 +457,15 @@ def evaluate(tool: str, scope: Optional[str], payload: Dict, now: int, direction
             # Default to block
             return {
                 "decision": "deny",
+                "raw_text_out": raw_text,
                 "reasons": ["precheck.error"],
                 "policy_id": "error-handler",
                 "ts": now
             }
 
-def _evaluate_policy(tool: str, scope: Optional[str], payload: Dict, now: int, direction: str = "ingress") -> Dict:
+def _evaluate_policy(tool: str, scope: Optional[str], raw_text: str, now: int, direction: str = "ingress") -> Dict:
     """
-    Internal policy evaluation logic with explicit precedence rules.
+    Internal policy evaluation logic with explicit precedence rules for raw text processing.
     
     POLICY PRECEDENCE (highest to lowest priority):
     1. DENY_TOOLS: Hard deny for dangerous tools (python.exec, bash.exec, etc.)
@@ -452,29 +494,26 @@ def _evaluate_policy(tool: str, scope: Optional[str], payload: Dict, now: int, d
     
     # PRECEDENCE LEVEL 2: Tool-specific access rules (highest priority for non-dangerous tools)
     if tool in tool_access and tool_access[tool].get("direction") == direction:
-        # Run PII detection to get findings
+        # Run PII detection on raw text
         findings = []
         if USE_PRESIDIO and ANALYZER is not None:
-            # Analyze each field in the payload
-            for key, value in payload.items():
-                if isinstance(value, str):
-                    results = ANALYZER.analyze(text=value, entities=list(ANONYMIZE_OPERATORS.keys()), language="en")
-                    for r in results:
-                        if not is_false_positive(r.entity_type, key, value):
-                            findings.append({
-                                "type": f"PII:{r.entity_type.lower()}",
-                                "path": f"$.{key}",
-                                "start": r.start,
-                                "end": r.end,
-                                "score": r.score
-                            })
+            results = ANALYZER.analyze(text=raw_text, entities=list(ANONYMIZE_OPERATORS.keys()), language="en")
+            for r in results:
+                if not is_false_positive(r.entity_type, "", raw_text):
+                    findings.append({
+                        "type": f"PII:{r.entity_type.lower()}",
+                        "start": r.start,
+                        "end": r.end,
+                        "score": r.score,
+                        "text": raw_text[r.start:r.end]
+                    })
         
-        # Apply tool-specific transformations
+        # Apply tool-specific transformations based on findings
         if findings:
-            transformed_payload, tool_reasons = apply_tool_access(tool, findings, payload)
+            transformed_text, tool_reasons = apply_tool_access_text(tool, findings, raw_text)
             return {
                 "decision": "transform",
-                "payload_out": transformed_payload,
+                "raw_text_out": transformed_text,
                 "reasons": tool_reasons,
                 "policy_id": "tool-access",
                 "ts": now
@@ -483,7 +522,7 @@ def _evaluate_policy(tool: str, scope: Optional[str], payload: Dict, now: int, d
             # No PII found, pass through
             return {
                 "decision": "allow",
-                "payload_out": payload,
+                "raw_text_out": raw_text,
                 "policy_id": "tool-access",
                 "ts": now
             }
@@ -501,22 +540,17 @@ def _evaluate_policy(tool: str, scope: Optional[str], payload: Dict, now: int, d
     elif default_action == "pass_through":
         return {
             "decision": "allow",
-            "payload_out": payload,
+            "raw_text_out": raw_text,
             "reasons": [f"default.{direction}.pass_through"],
             "policy_id": "defaults",
             "ts": now
         }
     elif default_action == "tokenize":
-        # Tokenize all string values
-        transformed = {}
-        for key, value in payload.items():
-            if isinstance(value, str):
-                transformed[key] = tokenize(value)
-            else:
-                transformed[key] = value
+        # Tokenize the entire text
+        tokenized_text = tokenize(raw_text)
         return {
             "decision": "transform",
-            "payload_out": transformed,
+            "raw_text_out": tokenized_text,
             "reasons": [f"default.{direction}.tokenize"],
             "policy_id": "defaults",
             "ts": now
@@ -524,23 +558,584 @@ def _evaluate_policy(tool: str, scope: Optional[str], payload: Dict, now: int, d
     
     # PRECEDENCE LEVEL 4: Network scope redaction (net.* scopes or web.* tools)
     if (scope or "").startswith(NET_SCOPES) or tool.startswith(NET_TOOLS_PREFIX):
-        new_payload, reasons = redact_obj(payload)
+        if USE_PRESIDIO and ANALYZER is not None:
+            redacted_text, reasons = anonymize_text_presidio(raw_text)
+        else:
+            redacted_text, reasons = anonymize_text_regex(raw_text)
         reasons = sorted(list(reasons))
         return {
             "decision": "transform",
-            "payload_out": new_payload,
+            "raw_text_out": redacted_text,
             "reasons": reasons or None,
             "policy_id": "net-redact-presidio" if USE_PRESIDIO else "net-redact-regex",
             "ts": now
         }
     
-    # PRECEDENCE LEVEL 5: Safe fallback (default redaction for all other cases)
-    new_payload, reasons = redact_obj(payload)
-    reasons = sorted(list(reasons))
-    return {
-        "decision": "transform",
-        "payload_out": new_payload,
-        "reasons": reasons or None,
-        "policy_id": "default-redact",
-        "ts": now
-    }
+    # PRECEDENCE LEVEL 5: Strict fallback (only block SSN and passwords)
+    return _apply_strict_fallback(raw_text, now)
+
+# NEW: Dynamic policy evaluation using payload-provided policies
+def evaluate_with_payload_policy(
+    tool: str, 
+    scope: Optional[str], 
+    raw_text: str, 
+    now: int, 
+    direction: str = "ingress",
+    policy_config: Optional[Dict] = None,
+    tool_config: Optional[Dict] = None,
+    user_id: Optional[str] = None,
+    budget_context: Optional[Dict] = None
+) -> Dict:
+    """
+    Evaluate policy using payload-provided configuration
+    Falls back to static YAML if no policy_config provided
+    """
+    
+    if not policy_config:
+        # Fallback to current YAML-based logic
+        return evaluate(tool, scope, raw_text, now, direction)
+    
+    # Use payload-provided policy configuration
+    return _evaluate_dynamic_policy(tool, scope, raw_text, now, direction, policy_config, tool_config, user_id, budget_context)
+
+def _evaluate_dynamic_policy(
+    tool: str, 
+    scope: Optional[str], 
+    raw_text: str, 
+    now: int, 
+    direction: str,
+    policy_config: Dict,
+    tool_config: Optional[Dict] = None,
+    user_id: Optional[str] = None,
+    budget_context: Optional[Dict] = None
+) -> Dict:
+    """Evaluate policy using dynamic configuration from payload"""
+    
+    try:
+        # PRECEDENCE LEVEL 1: Hard deny for dangerous tools
+        deny_tools = policy_config.get("deny_tools", ["python.exec", "bash.exec", "code.exec", "shell.exec"])
+        if tool in deny_tools:
+            return {
+                "decision": "deny",
+                "raw_text_out": raw_text,
+                "reasons": ["blocked tool: code/exec"],
+                "policy_id": "deny-exec",
+                "ts": now
+            }
+        
+        # PRECEDENCE LEVEL 2: Tool-specific access rules
+        tool_access = policy_config.get("tool_access", {})
+        
+        # Try exact match first
+        if tool in tool_access:
+            tool_policy = tool_access[tool]
+            tool_direction = tool_policy.get("direction")
+            # Support "both" direction or exact match
+            if tool_direction == direction or tool_direction == "both":
+                return _apply_tool_specific_policy_dynamic(tool, raw_text, now, tool_policy, user_id, tool_config, policy_config, budget_context)
+        
+        # Try partial matching for MCP tools (e.g., "mcp.weather.current" matches "weather.current")
+        for policy_tool, tool_policy in tool_access.items():
+            if tool.endswith("." + policy_tool) or tool.endswith(policy_tool):
+                tool_direction = tool_policy.get("direction")
+                # Support "both" direction or exact match
+                if tool_direction == direction or tool_direction == "both":
+                    return _apply_tool_specific_policy_dynamic(tool, raw_text, now, tool_policy, user_id, tool_config, policy_config, budget_context)
+        
+        # PRECEDENCE LEVEL 3: Global defaults for this direction
+        defaults = policy_config.get("defaults", {})
+        default_action = defaults.get(direction, {}).get("action", "redact")
+        return _apply_default_action_dynamic(default_action, raw_text, now, direction, policy_config)
+        
+    except Exception as e:
+        # Handle errors based on policy configuration
+        error_behavior = policy_config.get("on_error", "block")
+        
+        if error_behavior == "block":
+            return {
+                "decision": "deny",
+                "raw_text_out": raw_text,
+                "reasons": ["precheck.error"],
+                "policy_id": "error-handler",
+                "ts": now
+            }
+        elif error_behavior == "pass":
+            return {
+                "decision": "allow",
+                "raw_text_out": raw_text,
+                "reasons": ["precheck.bypass"],
+                "policy_id": "error-handler",
+                "ts": now
+            }
+        elif error_behavior == "best_effort":
+            # Try regex fallback, else tokenize everything blindly
+            try:
+                if USE_PRESIDIO and ANALYZER is not None:
+                    redacted_text, reasons = anonymize_text_presidio(raw_text)
+                else:
+                    redacted_text, reasons = anonymize_text_regex(raw_text)
+                return {
+                    "decision": "transform",
+                    "raw_text_out": redacted_text,
+                    "reasons": reasons or ["precheck.best_effort"],
+                    "policy_id": "error-handler-regex",
+                    "ts": now
+                }
+            except Exception:
+                # Last resort: tokenize everything
+                tokenized_text = tokenize(raw_text)
+                return {
+                    "decision": "transform",
+                    "raw_text_out": tokenized_text,
+                    "reasons": ["precheck.best_effort_tokenize"],
+                    "policy_id": "error-handler-tokenize",
+                    "ts": now
+                }
+        else:
+            # Default to block
+            return {
+                "decision": "deny",
+                "raw_text_out": raw_text,
+                "reasons": ["precheck.error"],
+                "policy_id": "error-handler",
+                "ts": now
+            }
+
+def _apply_tool_specific_policy_dynamic(tool: str, raw_text: str, now: int, tool_policy: Dict, user_id: Optional[str] = None, tool_config: Optional[Dict] = None, policy_config: Optional[Dict] = None, budget_context: Optional[Dict] = None) -> Dict:
+    """Apply tool-specific policy using dynamic configuration"""
+    
+    # Run PII detection on raw text
+    findings = []
+    if USE_PRESIDIO and ANALYZER is not None:
+        results = ANALYZER.analyze(text=raw_text, entities=list(ANONYMIZE_OPERATORS.keys()), language="en")
+        for r in results:
+            if not is_false_positive(r.entity_type, "", raw_text):
+                findings.append({
+                    "type": f"PII:{r.entity_type.lower()}",
+                    "start": r.start,
+                    "end": r.end,
+                    "score": r.score,
+                    "text": raw_text[r.start:r.end]
+                })
+    
+    # Apply tool-specific transformations based on findings and allow_pii rules
+    if findings:
+        allow_pii = tool_policy.get("allow_pii", {})
+        transformed_text, tool_reasons = apply_tool_access_text_dynamic(tool, findings, raw_text, allow_pii)
+        return {
+            "decision": "transform",
+            "raw_text_out": transformed_text,
+            "reasons": tool_reasons,
+            "policy_id": "tool-access",
+            "ts": now
+        }
+    else:
+        # No PII found, check if tool has default action override
+        action = tool_policy.get("action")
+        if action == "deny" or action == "block":
+            # Budget check not needed for deny/block actions
+            return {
+                "decision": "deny",
+                "raw_text_out": raw_text,
+                "reasons": ["tool-specific.block"],
+                "policy_id": "tool-access",
+                "ts": now
+            }
+        elif action == "tokenize":
+            tokenized_text = tokenize(raw_text)
+            return {
+                "decision": "transform",
+                "raw_text_out": tokenized_text,
+                "reasons": ["tool-specific.tokenize"],
+                "policy_id": "tool-access",
+                "ts": now
+            }
+        elif action == "confirm":
+            # Check budget first - budget overrides confirm
+            if user_id and tool_config and policy_config and budget_context:
+                budget_result = _check_budget_and_apply(user_id, tool, raw_text, tool_config, policy_config, budget_context, now)
+                if budget_result:
+                    return budget_result
+            
+            # If budget check passed, return confirm
+            result = {
+                "decision": "confirm",
+                "raw_text_out": raw_text,
+                "reasons": ["tool-specific.confirm"],
+                "policy_id": "tool-access",
+                "ts": now
+            }
+            
+            # Add budget info if available
+            if user_id and tool_config and policy_config and budget_context:
+                result = _add_budget_info_to_result(result, user_id, tool, raw_text, tool_config, policy_config, budget_context)
+            
+            return result
+        else:
+            # Default: pass through - but check budget first if user_id provided
+            result = {
+                "decision": "allow",
+                "raw_text_out": raw_text,
+                "policy_id": "tool-access",
+                "ts": now
+            }
+            
+            # Check budget if user_id and tool_config provided
+            if user_id and tool_config and policy_config and budget_context:
+                budget_result = _check_budget_and_apply(user_id, tool, raw_text, tool_config, policy_config, budget_context, now)
+                if budget_result:
+                    return budget_result
+                else:
+                    # Add budget info to the result
+                    result = _add_budget_info_to_result(result, user_id, tool, raw_text, tool_config, policy_config, budget_context)
+            
+            return result
+
+def apply_tool_access_text_dynamic(tool: str, findings: List[Dict], raw_text: str, allow_pii: Dict[str, str]) -> Tuple[str, List[str]]:
+    """Apply tool-specific text transformations using dynamic allow_pii rules"""
+    
+    transformed = raw_text
+    reasons = []
+    
+    # Sort findings by start position (reverse order to maintain indices)
+    findings_sorted = sorted(findings, key=lambda x: x["start"], reverse=True)
+    
+    for finding in findings_sorted:
+        pii_type = finding["type"]
+        start = finding["start"]
+        end = finding["end"]
+        original_text = finding["text"]
+        
+        # Check if this PII type is allowed for this tool
+        action = allow_pii.get(pii_type, "redact")  # Default to redact if not specified
+        
+        if action == "pass_through":
+            # Keep original text
+            continue
+        elif action == "tokenize":
+            # Replace with token
+            token = tokenize(original_text)
+            transformed = transformed[:start] + token + transformed[end:]
+            reasons.append(f"tokenized:{pii_type}")
+        elif action == "redact":
+            # Replace with placeholder
+            placeholder = f"[{pii_type.upper()}]"
+            transformed = transformed[:start] + placeholder + transformed[end:]
+            reasons.append(f"redacted:{pii_type}")
+        elif action == "deny":
+            # This should be handled at a higher level, but just redact here
+            placeholder = f"[{pii_type.upper()}]"
+            transformed = transformed[:start] + placeholder + transformed[end:]
+            reasons.append(f"redacted:{pii_type}")
+    
+    return transformed, reasons
+
+def _apply_default_action_dynamic(action: str, raw_text: str, now: int, direction: str, policy_config: Dict) -> Dict:
+    """Apply default action using dynamic configuration"""
+    
+    if action == "deny":
+        return {
+            "decision": "deny",
+            "raw_text_out": raw_text,
+            "reasons": [f"default.{direction}.deny"],
+            "policy_id": "defaults",
+            "ts": now
+        }
+    elif action == "pass_through":
+        return {
+            "decision": "allow",
+            "raw_text_out": raw_text,
+            "reasons": [f"default.{direction}.pass_through"],
+            "policy_id": "defaults",
+            "ts": now
+        }
+    elif action == "tokenize":
+        # Tokenize the entire text
+        tokenized_text = tokenize(raw_text)
+        return {
+            "decision": "transform",
+            "raw_text_out": tokenized_text,
+            "reasons": [f"default.{direction}.tokenize"],
+            "policy_id": "defaults",
+            "ts": now
+        }
+    
+    # PRECEDENCE LEVEL 4: Network scope redaction (net.* scopes or web.* tools)
+    network_scopes = policy_config.get("network_scopes", ["net."])
+    network_tools = policy_config.get("network_tools", ["web.", "http.", "fetch.", "request."])
+    
+    scope = policy_config.get("scope", "")
+    tool = policy_config.get("tool", "")
+    
+    if (scope and any(scope.startswith(ns) for ns in network_scopes)) or any(tool.startswith(nt) for nt in network_tools):
+        if USE_PRESIDIO and ANALYZER is not None:
+            redacted_text, reasons = anonymize_text_presidio(raw_text)
+        else:
+            redacted_text, reasons = anonymize_text_regex(raw_text)
+        reasons = sorted(list(reasons))
+        return {
+            "decision": "transform",
+            "raw_text_out": redacted_text,
+            "reasons": reasons or None,
+            "policy_id": "net-redact-presidio" if USE_PRESIDIO else "net-redact-regex",
+            "ts": now
+        }
+
+    # PRECEDENCE LEVEL 5: Strict fallback (only block SSN and passwords)
+    return _apply_strict_fallback(raw_text, now)
+
+def _apply_strict_fallback(raw_text: str, now: int) -> Dict:
+    """Apply strict fallback policy - block SSN, passwords, and payment amounts"""
+    
+    # Check for very strict PII types: SSN, passwords, and payment amounts
+    strict_pii_findings = []
+    
+    if USE_PRESIDIO and ANALYZER is not None:
+        # Use Presidio to detect only SSN patterns (PASSWORD entity doesn't exist in Presidio)
+        results = ANALYZER.analyze(text=raw_text, entities=["US_SSN"], language="en")
+        for r in results:
+            if not is_false_positive(r.entity_type, "", raw_text):
+                strict_pii_findings.append({
+                    "type": f"PII:{r.entity_type.lower()}",
+                    "start": r.start,
+                    "end": r.end,
+                    "score": r.score,
+                    "text": raw_text[r.start:r.end]
+                })
+        
+        # Add password detection using regex even when Presidio is available
+        import re
+        password_pattern = r'\b(?:password|pwd|pass)\s*[:=]\s*\S+'
+        for match in re.finditer(password_pattern, raw_text, re.IGNORECASE):
+            # Check if this match overlaps with any SSN match
+            overlaps_with_ssn = False
+            for ssn_finding in strict_pii_findings:
+                if ssn_finding["type"] == "PII:us_ssn":
+                    # Check if password match overlaps with SSN match
+                    if not (match.end() <= ssn_finding["start"] or match.start() >= ssn_finding["end"]):
+                        overlaps_with_ssn = True
+                        break
+            
+            if not overlaps_with_ssn:
+                strict_pii_findings.append({
+                    "type": "PII:password",
+                    "start": match.start(),
+                    "end": match.end(),
+                    "score": 0.8,
+                    "text": match.group()
+                })
+        
+        # Add payment amount detection
+        payment_pattern = r'\$\d+(?:\.\d{2})?|\b\d+(?:\.\d{2})?\s*(?:dollars?|USD|usd)\b|"(?:amount|price|cost)":\s*"?\d+(?:\.\d{2})?"?'
+        for match in re.finditer(payment_pattern, raw_text, re.IGNORECASE):
+            # Check if this match overlaps with any existing findings
+            overlaps = False
+            for finding in strict_pii_findings:
+                if not (match.end() <= finding["start"] or match.start() >= finding["end"]):
+                    overlaps = True
+                    break
+            
+            if not overlaps:
+                strict_pii_findings.append({
+                    "type": "PII:payment_amount",
+                    "start": match.start(),
+                    "end": match.end(),
+                    "score": 0.9,
+                    "text": match.group()
+                })
+    else:
+        # Fallback to regex for SSN and password detection
+        import re
+        
+        # SSN pattern (XXX-XX-XXXX)
+        ssn_pattern = r'\b\d{3}-\d{2}-\d{4}\b'
+        for match in re.finditer(ssn_pattern, raw_text):
+            strict_pii_findings.append({
+                "type": "PII:us_ssn",
+                "start": match.start(),
+                "end": match.end(),
+                "score": 0.9,
+                "text": match.group()
+            })
+        
+        # Password pattern (basic detection for "password:" or "pwd:")
+        password_pattern = r'\b(?:password|pwd|pass)\s*[:=]\s*\S+'
+        for match in re.finditer(password_pattern, raw_text, re.IGNORECASE):
+            # Check if this match overlaps with any SSN match
+            overlaps_with_ssn = False
+            for ssn_finding in strict_pii_findings:
+                if ssn_finding["type"] == "PII:us_ssn":
+                    # Check if password match overlaps with SSN match
+                    if not (match.end() <= ssn_finding["start"] or match.start() >= ssn_finding["end"]):
+                        overlaps_with_ssn = True
+                        break
+            
+            if not overlaps_with_ssn:
+                strict_pii_findings.append({
+                    "type": "PII:password",
+                    "start": match.start(),
+                    "end": match.end(),
+                    "score": 0.8,
+                    "text": match.group()
+                })
+        
+        # Payment amount pattern
+        payment_pattern = r'\$\d+(?:\.\d{2})?|\b\d+(?:\.\d{2})?\s*(?:dollars?|USD|usd)\b|"(?:amount|price|cost)":\s*"?\d+(?:\.\d{2})?"?'
+        for match in re.finditer(payment_pattern, raw_text, re.IGNORECASE):
+            # Check if this match overlaps with any existing findings
+            overlaps = False
+            for finding in strict_pii_findings:
+                if not (match.end() <= finding["start"] or match.start() >= finding["end"]):
+                    overlaps = True
+                    break
+            
+            if not overlaps:
+                strict_pii_findings.append({
+                    "type": "PII:payment_amount",
+                    "start": match.start(),
+                    "end": match.end(),
+                    "score": 0.9,
+                    "text": match.group()
+                })
+    
+    if strict_pii_findings:
+        # Block the request if strict PII found
+        return {
+            "decision": "deny",
+            "raw_text_out": raw_text,  # Include original text even when denying
+            "reasons": [f"strict_pii_blocked:{finding['type']}" for finding in strict_pii_findings],
+            "policy_id": "strict-fallback",
+            "ts": now
+        }
+    else:
+        # Allow the request if no strict PII found
+        return {
+            "decision": "allow",
+            "raw_text_out": raw_text,
+            "reasons": ["strict_fallback.allow"],
+            "policy_id": "strict-fallback",
+            "ts": now
+        }
+
+def _check_budget_and_apply(
+    user_id: str, 
+    tool: str, 
+    raw_text: str, 
+    tool_config: Dict, 
+    policy_config: Dict, 
+    budget_context: Optional[Dict],
+    now: int
+) -> Optional[Dict]:
+    """Check budget and apply budget-based decisions"""
+    
+    try:
+        from .budget import (
+            estimate_request_cost, 
+            get_purchase_amount, 
+            check_budget_with_context,
+            update_budget_after_decision
+        )
+        
+        # Only check budget if budget_context is provided
+        if not budget_context:
+            return None
+        
+        # Get model from policy config or tool config
+        model = policy_config.get("model", "gpt-4")
+        if tool_config and "metadata" in tool_config:
+            model = tool_config["metadata"].get("model", model)
+        
+        # Estimate costs
+        estimated_llm_cost = estimate_request_cost(raw_text, model)
+        estimated_purchase = get_purchase_amount(tool_config)
+        
+        # Only check budget if there's a purchase amount or if LLM cost is significant
+        if estimated_purchase is None and estimated_llm_cost < 0.01:
+            # No significant cost - just add budget info without blocking
+            return None
+        
+        # Check budget using context from request
+        budget_status, budget_info = check_budget_with_context(budget_context, estimated_llm_cost, estimated_purchase)
+        
+        # Determine decision based on budget
+        if not budget_status.allowed:
+            # Budget exceeded - deny the request
+            return {
+                "decision": "deny",
+                "raw_text_out": raw_text,
+                "reasons": ["budget_exceeded"],
+                "policy_id": "budget-check",
+                "ts": now,
+                "budget_status": budget_status,
+                "budget_info": budget_info
+            }
+        elif budget_status.reason == "budget_warning":
+            # Budget warning - require confirmation
+            return {
+                "decision": "confirm",
+                "raw_text_out": raw_text,
+                "reasons": ["budget_warning"],
+                "policy_id": "budget-check",
+                "ts": now,
+                "budget_status": budget_status,
+                "budget_info": budget_info
+            }
+        else:
+            # Budget OK - allow but include budget info
+            # Note: We don't return here, let the normal policy flow continue
+            # The budget info will be added to the final result
+            return None
+            
+    except Exception as e:
+        # If budget checking fails, log error but don't block the request
+        print(f"Budget check failed: {e}")
+        return None
+
+def _add_budget_info_to_result(result: Dict, user_id: str, tool: str, raw_text: str, tool_config: Dict, policy_config: Dict, budget_context: Optional[Dict]) -> Dict:
+    """Add budget information to policy evaluation result"""
+    
+    try:
+        from .budget import estimate_request_cost, get_purchase_amount, check_budget_with_context
+        
+        # Only add budget info if budget_context is provided
+        if not budget_context:
+            return result
+        
+        # Get model from policy config or tool config
+        model = policy_config.get("model", "gpt-4")
+        if tool_config and "metadata" in tool_config:
+            model = tool_config["metadata"].get("model", model)
+        
+        # Estimate costs
+        estimated_llm_cost = estimate_request_cost(raw_text, model)
+        estimated_purchase = get_purchase_amount(tool_config)
+        
+        # Only add budget info if there's a purchase amount or if LLM cost is significant
+        if estimated_purchase is None and estimated_llm_cost < 0.01:
+            # No significant cost - return result without budget info
+            return result
+        
+        # Check budget using context from request
+        budget_status, budget_info = check_budget_with_context(budget_context, estimated_llm_cost, estimated_purchase)
+        
+        # Add budget info to result
+        result["budget_status"] = budget_status
+        result["budget_info"] = budget_info
+        
+        # Add budget-related reasons
+        if "reasons" not in result:
+            result["reasons"] = []
+        
+        if budget_status.reason == "budget_ok":
+            result["reasons"].append("budget_check_passed")
+        elif budget_status.reason == "budget_warning":
+            result["reasons"].append("budget_warning")
+        elif budget_status.reason == "budget_exceeded":
+            result["reasons"].append("budget_exceeded")
+        
+        return result
+        
+    except Exception as e:
+        # If budget checking fails, return result without budget info
+        print(f"Failed to add budget info: {e}")
+        return result

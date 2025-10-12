@@ -6,17 +6,20 @@ GovernsAI Precheck is a policy evaluation and PII redaction service that provide
 
 ## Core Features
 
-### 1. Policy Evaluation Engine
+### 1. Dynamic Policy Evaluation Engine
+- **Payload-based policies**: Policies sent by agent/client in request payload
 - **Tool-based policies**: Different rules for different AI tools
 - **Scope-based policies**: Network scope restrictions (e.g., `net.external`)
 - **PII detection**: Advanced PII detection using Presidio with fallback to regex
 - **Real-time decisions**: Fast policy evaluation with sub-second response times
+- **Agent-side policy management**: Policies fetched and managed by agent, not precheck service
 
 ### 2. Per-Tool PII Access Control
 - **Tool-specific allowlists**: Configure which PII types each tool can access
-- **Transform actions**: Support for `pass_through`, `tokenize`, and default redaction
+- **Transform actions**: Support for `pass_through`, `tokenize`, `confirm`, and default redaction
 - **Stable tokenization**: HMAC-based consistent token generation
-- **Policy configuration**: YAML-based policy files for easy management
+- **Dynamic policy configuration**: Policies sent in request payload for real-time updates
+- **Backward compatibility**: Falls back to strict PII blocking (SSN and passwords only) when no payload provided
 
 ### 3. PII Detection & Redaction
 - **Presidio integration**: Advanced NLP-based PII detection
@@ -40,10 +43,79 @@ GovernsAI Precheck is a policy evaluation and PII redaction service that provide
 - **Provable governance**: Complete audit trail without database dependency
 - **Log shipping ready**: Compatible with Loki/Datadog ingestion
 
-### 7. Policy Hot-Reload
+### 7. Budget Management & Cost Control
+- **Real-time budget tracking**: Track LLM and purchase costs per user
+- **Cost estimation**: Automatic cost estimation based on model and text length
+- **Budget enforcement**: Block requests that exceed budget limits
+- **Purchase detection**: Extract purchase amounts from tool metadata
+- **Budget warnings**: Require confirmation when approaching budget limits
+- **Monthly budget reset**: Automatic budget reset at month boundaries
+
+### 8. Policy Hot-Reload
 - **Live policy updates**: Reload policies without service restart
 - **File change detection**: Automatic reload when policy file is modified
 - **Global defaults**: Organization-wide policy stance configuration
+
+## Dynamic Policy Architecture
+
+### Overview
+The precheck service now supports dynamic policy evaluation where policies are sent by the agent/client in the request payload, rather than being loaded from static YAML files. This enables real-time policy updates and user-specific policy management.
+
+### Policy Payload Structure
+```json
+{
+  "tool": "send_email",
+  "raw_text": "Send email to john.doe@company.com with SSN 123-45-6789",
+  "scope": "net.external",
+  "corr_id": "req-12345",
+  
+  "policy_config": {
+    "version": "v1",
+    "defaults": {
+      "ingress": {"action": "redact"},
+      "egress": {"action": "redact"}
+    },
+    "tool_access": {
+      "send_email": {
+        "direction": "ingress",
+        "action": "redact",
+        "allow_pii": {
+          "PII:email_address": "pass_through",
+          "PII:us_ssn": "tokenize"
+        }
+      }
+    },
+    "deny_tools": ["python.exec", "bash.exec", "code.exec", "shell.exec"],
+    "network_scopes": ["net."],
+    "network_tools": ["web.", "http.", "fetch.", "request."],
+    "on_error": "block"
+  },
+  
+  "tool_config": {
+    "tool_name": "send_email",
+    "scope": "net.external",
+    "direction": "ingress",
+    "metadata": {
+      "category": "communication",
+      "risk_level": "medium"
+    }
+  }
+}
+```
+
+### Policy Evaluation Flow
+1. **Agent fetches policies** from database (user/org-specific)
+2. **Agent sends policies** in request payload to precheck service
+3. **Precheck evaluates** using payload policies (no database queries)
+4. **Precheck returns** decision with transformed text
+5. **Agent handles** the response and proceeds with tool execution
+
+### Benefits
+- **🚀 Performance**: No database queries in precheck service
+- **🔄 Real-time**: Policies updated instantly without service restart
+- **🔒 Security**: User/org-specific policies
+- **📈 Scalable**: Precheck service stays lightweight
+- **🔄 Backward Compatible**: Falls back to YAML if no payload provided
 
 ## API Documentation
 
@@ -53,6 +125,14 @@ The complete API specification is available in OpenAPI 3.1.0 format:
 - **Interactive Docs**: `http://localhost:8080/docs` (Swagger UI)
 - **Alternative Docs**: `http://localhost:8080/redoc` (ReDoc)
 - **Schema**: `http://localhost:8080/openapi.json` (JSON schema)
+
+### Decision Types
+The precheck service returns one of four decision types:
+
+- **`allow`**: Tool execution is permitted without modification
+- **`deny`**: Tool execution is blocked (e.g., dangerous tools, policy violations)
+- **`transform`**: Tool execution is permitted but text is modified (e.g., PII redaction, tokenization)
+- **`confirm`**: User confirmation is required before tool execution (e.g., sensitive operations)
 
 ### Policy Precedence in API Responses
 All API responses include a `policy_id` field that indicates which precedence level was applied:
@@ -116,17 +196,45 @@ GET /metrics
 POST /v1/u/{user_id}/precheck
 ```
 
-**Purpose**: Evaluate policy and sanitize payload before tool execution
+**Purpose**: Evaluate policy and sanitize raw text before tool execution
 
-**Request**:
+**Authentication**: API key passed via `X-Governs-Key` header (forwarded to WebSocket for authentication)
+
+**Request** (with dynamic policies):
 ```json
 {
   "tool": "verify_identity",
   "scope": "net.external",
-  "payload": {
-    "email": "alice@example.com",
-    "ssn": "123-45-6789"
-  },
+  "raw_text": "User email: alice@example.com, SSN: 123-45-6789",
+  "corr_id": "req-123",
+  "tags": ["urgent", "customer"],
+  "policy_config": {
+    "version": "v1",
+    "defaults": {
+      "ingress": {"action": "redact"},
+      "egress": {"action": "redact"}
+    },
+    "tool_access": {
+      "verify_identity": {
+        "direction": "ingress",
+        "allow_pii": {
+          "PII:email_address": "pass_through",
+          "PII:us_ssn": "tokenize"
+        }
+      }
+    },
+    "deny_tools": ["python.exec", "bash.exec"],
+    "on_error": "block"
+  }
+}
+```
+
+**Request** (legacy - falls back to YAML):
+```json
+{
+  "tool": "verify_identity",
+  "scope": "net.external",
+  "raw_text": "User email: alice@example.com, SSN: 123-45-6789",
   "corr_id": "req-123",
   "tags": ["urgent", "customer"]
 }
@@ -136,10 +244,7 @@ POST /v1/u/{user_id}/precheck
 ```json
 {
   "decision": "transform",
-  "payload_out": {
-    "email": "alice@example.com",
-    "ssn": "pii_8797942a"
-  },
+  "raw_text_out": "User email: alice@example.com, SSN: pii_8797942a",
   "reasons": [
     "pii.allowed:PII:email_address",
     "pii.tokenized:PII:us_ssn"
@@ -154,7 +259,9 @@ POST /v1/u/{user_id}/precheck
 POST /v1/u/{user_id}/postcheck
 ```
 
-**Purpose**: Validate and sanitize payload after tool execution (egress)
+**Purpose**: Validate and sanitize raw text after tool execution (egress)
+
+**Authentication**: API key passed via `X-Governs-Key` header (forwarded to WebSocket for authentication)
 
 **Request/Response**: Same format as precheck
 
@@ -275,6 +382,9 @@ Every policy decision emits a webhook event with the following schema:
     "decision": "transform",
     "tool": "verify_identity",
     "scope": "net.external",
+    "rawText": "User email: alice@example.com, SSN: 123-45-6789",
+    "rawTextOut": "User email: alice@example.com, SSN: pii_8797942a",
+    "reasons": ["pii.allowed:PII:email_address","pii.tokenized:PII:us_ssn"],
     "detectorSummary": {
       "reasons": ["pii.allowed:PII:email_address","pii.tokenized:PII:us_ssn"],
       "confidence": 0.85,
@@ -284,7 +394,11 @@ Every policy decision emits a webhook event with the following schema:
     "latencyMs": 45,
     "correlationId": "req-123",
     "tags": ["production", "api-call"],
-    "ts": "2024-12-26T10:15:30.123Z"
+    "ts": "2024-12-26T10:15:30.123Z",
+    "authentication": {
+      "userId": "u1",
+      "apiKey": "GAI_LOCAL_DEV_ABC"
+    }
   }
 }
 ```
@@ -300,9 +414,12 @@ Every policy decision emits a webhook event with the following schema:
 #### Data Fields
 - **`orgId`**: Organization identifier (configurable via `ORG_ID` environment variable)
 - **`direction`**: `"precheck"` for ingress, `"postcheck"` for egress
-- **`decision`**: Policy decision (`allow`, `deny`, `transform`)
+- **`decision`**: Policy decision (`allow`, `deny`, `transform`, `confirm`)
 - **`tool`**: Tool name from the request
 - **`scope`**: Network scope from the request
+- **`rawText`**: Original raw text input from the request
+- **`rawTextOut`**: Processed text output with redundant values replaced
+- **`reasons`**: Array of reason codes explaining the decision
 - **`detectorSummary`**: PII detection results and confidence
   - **`reasons`**: Array of reason codes explaining the decision
   - **`confidence`**: Calculated confidence score (0.0-1.0) based on PII detection actions
@@ -312,6 +429,9 @@ Every policy decision emits a webhook event with the following schema:
 - **`correlationId`**: Correlation ID for request tracking
 - **`tags`**: Array of strings for categorization (currently empty, configurable)
 - **`ts`**: ISO 8601 timestamp of the decision
+- **`authentication`**: Authentication information from the request
+  - **`userId`**: User ID extracted from the URL path parameter
+  - **`apiKey`**: API key from the request header
 
 ### WebSocket Webhook Integration
 
@@ -329,7 +449,7 @@ ws://172.16.10.59:3002/api/ws/gateway?key=gai_827eode3nxa&org=dfy&channels=org:c
 - **`channel`**: Extracted from `channels` parameter, finds the `:decisions` channel (`org:cmfzriajm0003fyp86ocrgjoj:decisions`)
 - **`apiKey`**: Extracted from `key` parameter (`gai_827eode3nxa`)
 
-**Dynamic Configuration**: All values are dynamically extracted from the webhook URL. If parsing fails or required values (`orgId` or `channel`) are not found in the URL, webhook emission is skipped with a warning message. The service will still process the request and return a response, but no webhook event will be emitted.
+**Dynamic Configuration**: All values are dynamically extracted from the webhook URL. If parsing fails or values (`orgId` or `channel`) are not found in the URL, they will be `null` in the webhook event, but the event will still be emitted. The service will always process the request and emit webhook events regardless of URL parsing success.
 
 ## Policy Configuration
 
@@ -413,11 +533,11 @@ The policy evaluation system follows a strict precedence hierarchy (highest to l
 - **Policy ID**: `net-redact-presidio` or `net-redact-regex`
 - **Override**: Takes precedence over safe fallback
 
-### 5. **SAFE_FALLBACK** (Lowest Priority)
-- **Purpose**: Default redaction for all other cases
+### 5. **STRICT_FALLBACK** (Lowest Priority)
+- **Purpose**: Block only strict PII types (SSN and passwords)
 - **Condition**: No other rules apply
-- **Actions**: Always `redact` (PII detection and redaction)
-- **Policy ID**: `default-redact`
+- **Actions**: `deny` for SSN/passwords, `allow` for everything else
+- **Policy ID**: `strict-fallback`
 - **Override**: Final fallback for safety
 
 ### Precedence Examples
@@ -428,7 +548,8 @@ The policy evaluation system follows a strict precedence hierarchy (highest to l
 | `verify_identity` | `net.external` | `ingress` | TOOL_SPECIFIC | `tool-access` | `pii.allowed:PII:email_address` |
 | `unknown_tool` | `net.external` | `ingress` | GLOBAL_DEFAULTS | `defaults` | `default.ingress.redact` |
 | `web.fetch` | `internal` | `ingress` | NETWORK_SCOPE | `net-redact-presidio` | `pii.redacted:email_address` |
-| `random_tool` | `internal` | `ingress` | SAFE_FALLBACK | `default-redact` | `pii.redacted:email_address` |
+| `safe_tool` | `local` | `ingress` | STRICT_FALLBACK | `strict-fallback` | `strict_fallback.allow` |
+| `any_tool` | `local` | `ingress` | STRICT_FALLBACK | `strict-fallback` | `strict_pii_blocked:PII:us_ssn` |
 
 ### Policy Directions
 
@@ -539,6 +660,169 @@ graph TD
     I --> J
 ```
 
+## Budget Management
+
+### Overview
+The precheck service includes comprehensive budget management to track and control costs for both LLM usage and purchases. Budget tracking is integrated into the policy evaluation process and can block or warn about requests that exceed budget limits.
+
+### Budget Features
+
+#### 1. Cost Estimation
+- **LLM Cost Estimation**: Automatic cost calculation based on model type and text length
+- **Purchase Detection**: Extract purchase amounts from tool metadata fields
+- **Model Support**: Support for major LLM providers (GPT-4, Claude, etc.)
+- **Token Estimation**: Rough token estimation based on text character count
+
+#### 2. Budget Tracking
+- **User-level Budgets**: Individual budget limits per user
+- **Monthly Reset**: Automatic budget reset at month boundaries
+- **Dual Tracking**: Separate tracking for LLM costs and purchase costs
+- **Transaction History**: Complete audit trail of all budget transactions
+
+#### 3. Budget Enforcement
+- **Hard Limits**: Block requests that would exceed budget
+- **Warning Thresholds**: Require confirmation when approaching budget limits
+- **Graceful Degradation**: Fallback behavior when budget checking fails
+
+### Budget Database Schema
+
+#### Budget Table
+```sql
+CREATE TABLE budgets (
+    user_id VARCHAR PRIMARY KEY,
+    monthly_limit FLOAT DEFAULT 10.0,
+    current_spend FLOAT DEFAULT 0.0,
+    llm_spend FLOAT DEFAULT 0.0,
+    purchase_spend FLOAT DEFAULT 0.0,
+    budget_type VARCHAR DEFAULT 'user',
+    last_reset DATETIME DEFAULT CURRENT_TIMESTAMP,
+    is_active BOOLEAN DEFAULT TRUE
+);
+```
+
+#### Budget Transactions Table
+```sql
+CREATE TABLE budget_transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id VARCHAR NOT NULL,
+    transaction_type VARCHAR NOT NULL,  -- 'llm' or 'purchase'
+    amount FLOAT NOT NULL,
+    description VARCHAR,
+    tool VARCHAR,
+    correlation_id VARCHAR,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### Enhanced Request Format
+
+The precheck service now accepts enhanced request formats with budget information:
+
+```json
+{
+  "tool": "weather.current",
+  "raw_text": "Get weather for Berlin",
+  "scope": "precheck",
+  "corr_id": "unique_id",
+  "tool_config": {
+    "tool_name": "weather.current",
+    "scope": "net.external",
+    "direction": "ingress",
+    "metadata": {
+      "purchase_amount": 25.99,
+      "amount": 25.99,
+      "price": 25.99,
+      "cost": 25.99,
+      "vendor": "Shopify",
+      "category": "software",
+      "description": "Premium plan upgrade",
+      "currency": "USD",
+      "model": "gpt-4"
+    }
+  },
+  "policy_config": {
+    "version": "v1",
+    "model": "gpt-4",
+    "defaults": {
+      "ingress": {"action": "redact"},
+      "egress": {"action": "redact"}
+    },
+    "tool_access": {
+      "weather.current": {
+        "direction": "both",
+        "action": "allow"
+      }
+    },
+    "deny_tools": ["python.exec", "bash.exec"],
+    "on_error": "block"
+  }
+}
+```
+
+### Enhanced Response Format
+
+The precheck service now returns enhanced responses with budget information:
+
+```json
+{
+  "decision": "allow",
+  "raw_text_out": "processed_text",
+  "reasons": ["budget_check_passed"],
+  "policy_id": "tool-access",
+  "ts": 1234567890,
+  "budget_status": {
+    "allowed": true,
+    "currentSpend": 3.50,
+    "limit": 10.00,
+    "remaining": 6.50,
+    "percentUsed": 35.0,
+    "reason": "budget_ok"
+  },
+  "budget_info": {
+    "monthly_limit": 10.00,
+    "current_spend": 3.50,
+    "llm_spend": 2.00,
+    "purchase_spend": 1.50,
+    "remaining_budget": 6.50,
+    "estimated_cost": 0.05,
+    "estimated_purchase": 25.99,
+    "projected_total": 29.54,
+    "percent_used": 35.0,
+    "budget_type": "user"
+  }
+}
+```
+
+### Budget Decision Types
+
+The budget system can return three types of decisions:
+
+1. **`allow`**: Budget is within limits, request can proceed
+2. **`confirm`**: Budget warning - user confirmation required
+3. **`deny`**: Budget exceeded - request blocked
+
+### Cost Estimation Models
+
+The service supports cost estimation for major LLM providers:
+
+| Model | Input Cost (per token) | Output Cost (per token) |
+|-------|------------------------|-------------------------|
+| GPT-4 | $0.00003 | $0.00006 |
+| GPT-4 Turbo | $0.00001 | $0.00003 |
+| GPT-3.5 Turbo | $0.0000015 | $0.000002 |
+| Claude-3 Opus | $0.000015 | $0.000075 |
+| Claude-3 Sonnet | $0.000003 | $0.000015 |
+| Claude-3 Haiku | $0.00000025 | $0.00000125 |
+
+### Budget Configuration
+
+Budget limits can be configured per user:
+
+- **Default Monthly Limit**: $10.00
+- **Budget Type**: `user` or `organization`
+- **Reset Schedule**: Monthly (automatic)
+- **Warning Threshold**: 90% of budget used
+
 ## Configuration
 
 ### Environment Variables
@@ -567,9 +851,9 @@ graph TD
 ## Security Features
 
 ### Authentication
-- API key-based authentication
-- Configurable API key header
-- Demo key for development/testing
+- API key passed to WebSocket for authentication handling
+- No API-level authentication enforcement
+- API key extracted from `X-Governs-Key` header and forwarded to webhook events
 
 ### Rate Limiting
 - 100 requests per minute per user
@@ -647,10 +931,7 @@ curl -X POST http://localhost:8080/v1/u/u1/precheck \
   -d '{
     "tool": "verify_identity",
     "scope": "net.external",
-    "payload": {
-      "email": "alice@example.com",
-      "ssn": "123-45-6789"
-    },
+    "raw_text": "User email: alice@example.com, SSN: 123-45-6789",
     "corr_id": "req-123"
   }'
 ```
@@ -659,10 +940,7 @@ curl -X POST http://localhost:8080/v1/u/u1/precheck \
 ```json
 {
   "decision": "transform",
-  "payload_out": {
-    "email": "alice@example.com",
-    "ssn": "pii_8797942a"
-  },
+  "raw_text_out": "User email: alice@example.com, SSN: pii_8797942a",
   "reasons": [
     "pii.allowed:PII:email_address",
     "pii.tokenized:PII:us_ssn"
@@ -680,10 +958,7 @@ curl -X POST http://localhost:8080/v1/u/u1/precheck \
   -d '{
     "tool": "send_marketing_email",
     "scope": "net.external",
-    "payload": {
-      "email": "alice@example.com",
-      "ssn": "123-45-6789"
-    },
+    "raw_text": "Send email to alice@example.com, SSN: 123-45-6789",
     "corr_id": "req-124"
   }'
 ```
@@ -692,10 +967,7 @@ curl -X POST http://localhost:8080/v1/u/u1/precheck \
 ```json
 {
   "decision": "transform",
-  "payload_out": {
-    "email": "alice@example.com",
-    "ssn": "<USER_SSN>"
-  },
+  "raw_text_out": "Send email to alice@example.com, SSN: <USER_SSN>",
   "reasons": [
     "pii.allowed:PII:email_address",
     "pii.redacted:PII:us_ssn"
@@ -713,10 +985,7 @@ curl -X POST http://localhost:8080/v1/u/u1/postcheck \
   -d '{
     "tool": "data_export",
     "scope": "net.external",
-    "payload": {
-      "email": "alice@example.com",
-      "ssn": "123456789"
-    },
+    "raw_text": "Export data for alice@example.com, SSN: 123456789",
     "corr_id": "req-125"
   }'
 ```
@@ -725,10 +994,7 @@ curl -X POST http://localhost:8080/v1/u/u1/postcheck \
 ```json
 {
   "decision": "transform",
-  "payload_out": {
-    "email": "alice@example.com",
-    "ssn": "pii_a70ae1e6"
-  },
+  "raw_text_out": "Export data for alice@example.com, SSN: pii_a70ae1e6",
   "reasons": [
     "pii.allowed:PII:email_address",
     "pii.tokenized:PII:us_ssn"
@@ -746,10 +1012,7 @@ curl -X POST http://localhost:8080/v1/u/u1/postcheck \
   -d '{
     "tool": "audit_log",
     "scope": "net.external",
-    "payload": {
-      "email": "alice@example.com",
-      "ssn": "123456789"
-    },
+    "raw_text": "Audit log for alice@example.com, SSN: 123456789",
     "corr_id": "req-126"
   }'
 ```
@@ -758,10 +1021,7 @@ curl -X POST http://localhost:8080/v1/u/u1/postcheck \
 ```json
 {
   "decision": "transform",
-  "payload_out": {
-    "email": "alice@example.com",
-    "ssn": "<USER_SSN>"
-  },
+  "raw_text_out": "Audit log for alice@example.com, SSN: <USER_SSN>",
   "reasons": [
     "pii.allowed:PII:email_address",
     "pii.redacted:PII:us_ssn"
@@ -772,6 +1032,19 @@ curl -X POST http://localhost:8080/v1/u/u1/postcheck \
 ```
 
 ## Recent Changes Log
+- **2024-12-26**: **BREAKING CHANGE**: Migrated API from payload-based to raw text-based processing
+  - **Request Model**: Changed `payload` field to `raw_text` (string) in `PrePostCheckRequest`
+  - **Response Model**: Changed `payload_out` field to `raw_text_out` (string) in `DecisionResponse`
+  - **Policy Evaluation**: Updated `evaluate()` function to process raw text instead of JSON payloads
+  - **PII Processing**: Added `apply_tool_access_text()` function for text-based PII transformations
+  - **API Endpoints**: Updated precheck and postcheck endpoints to handle raw text input/output
+  - **Webhook Events**: Updated payload hash calculation to use raw text instead of JSON serialization
+  - **Documentation**: Updated all API examples and test cases to use raw text format
+  - **Backward Compatibility**: Maintained legacy model aliases for gradual migration
+  - **WebSocket Authentication**: Added `authentication` object to webhook events containing `userId` and `apiKey`
+  - **Removed API Authentication**: Removed `X-Governs-Key` authentication enforcement from API endpoints, now passed to WebSocket for handling
+  - **Removed Webhook Validation**: Removed validation that prevented webhook emission when `orgId` or `channel` are `None` - webhook events are now always sent
+  - **Enhanced Webhook Events**: Added `rawText`, `rawTextOut`, and `reasons` fields to webhook events for complete request/response context
 - **2024-12-26**: Updated webhook payload structure to match new API documentation format
   - Changed from flat event structure to nested structure with `type`, `channel`, `schema`, `idempotencyKey`, and `data` fields
   - Updated direction mapping from `ingress`/`egress` to `precheck`/`postcheck`

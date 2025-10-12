@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, String, Integer, DateTime, Text, Boolean
+from sqlalchemy import create_engine, Column, String, Integer, DateTime, Text, Boolean, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
@@ -53,6 +53,30 @@ class Quota(Base):
     current_monthly = Column(Integer, default=0)
     last_reset_daily = Column(DateTime, default=datetime.utcnow)
     last_reset_monthly = Column(DateTime, default=datetime.utcnow)
+
+class Budget(Base):
+    __tablename__ = "budgets"
+    
+    user_id = Column(String, primary_key=True)
+    monthly_limit = Column(Float, default=10.0)  # Default $10/month
+    current_spend = Column(Float, default=0.0)
+    llm_spend = Column(Float, default=0.0)
+    purchase_spend = Column(Float, default=0.0)
+    budget_type = Column(String, default="user")  # "user" or "organization"
+    last_reset = Column(DateTime, default=datetime.utcnow)
+    is_active = Column(Boolean, default=True)
+
+class BudgetTransaction(Base):
+    __tablename__ = "budget_transactions"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, nullable=False)
+    transaction_type = Column(String, nullable=False)  # "llm" or "purchase"
+    amount = Column(Float, nullable=False)
+    description = Column(String)
+    tool = Column(String)
+    correlation_id = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 # Database setup
 engine = create_engine(settings.db_url)
