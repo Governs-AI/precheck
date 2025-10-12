@@ -16,13 +16,17 @@ Policy evaluation and PII redaction service for GovernsAI. This service provides
 ### Local Development
 
 1. **Install dependencies**:
+
    ```bash
-   pip install -e .
+   pip install -r requirements.txt
    python -m spacy download en_core_web_sm
    ```
 
 2. **Run the service**:
+
    ```bash
+   python start.py
+   # or
    uvicorn app.main:app --reload --host 0.0.0.0 --port 8080
    ```
 
@@ -34,6 +38,7 @@ Policy evaluation and PII redaction service for GovernsAI. This service provides
 ### Docker
 
 1. **Build the image**:
+
    ```bash
    docker build -t governsai-precheck .
    ```
@@ -46,6 +51,7 @@ Policy evaluation and PII redaction service for GovernsAI. This service provides
 ## API Endpoints
 
 ### Health Check
+
 ```http
 GET /v1/health
 ```
@@ -53,6 +59,7 @@ GET /v1/health
 Returns service status and version information.
 
 ### Precheck
+
 ```http
 POST /v1/u/{user_id}/precheck
 X-Governs-Key: your-api-key
@@ -71,6 +78,7 @@ Content-Type: application/json
 ```
 
 **Response**:
+
 ```json
 {
   "decision": "transform",
@@ -85,6 +93,7 @@ Content-Type: application/json
 ```
 
 ### Postcheck
+
 ```http
 POST /v1/u/{user_id}/postcheck
 ```
@@ -95,15 +104,15 @@ Similar to precheck but for post-execution validation.
 
 The service can be configured via environment variables:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `APP_BIND` | `0.0.0.0:8080` | Server bind address |
-| `DB_URL` | `sqlite:///./local.db` | Database connection URL |
-| `REDIS_URL` | `None` | Redis connection URL (optional) |
-| `USE_PRESIDIO` | `true` | Enable Presidio PII detection |
-| `PRESIDIO_MODEL` | `en_core_web_sm` | spaCy model for Presidio |
-| `WEBHOOK_URL` | `None` | Webhook URL for dashboard events |
-| `PRECHECK_DLQ` | `/tmp/precheck.dlq.jsonl` | Dead letter queue file path |
+| Variable         | Default                   | Description                      |
+| ---------------- | ------------------------- | -------------------------------- |
+| `APP_BIND`       | `0.0.0.0:8080`            | Server bind address              |
+| `DB_URL`         | `sqlite:///./local.db`    | Database connection URL          |
+| `REDIS_URL`      | `None`                    | Redis connection URL (optional)  |
+| `USE_PRESIDIO`   | `true`                    | Enable Presidio PII detection    |
+| `PRESIDIO_MODEL` | `en_core_web_sm`          | spaCy model for Presidio         |
+| `WEBHOOK_URL`    | `None`                    | Webhook URL for dashboard events |
+| `PRECHECK_DLQ`   | `/tmp/precheck.dlq.jsonl` | Dead letter queue file path      |
 
 ## PII Detection
 
@@ -126,6 +135,7 @@ If Presidio fails to initialize, the service falls back to regex-based detection
 The service emits fire-and-forget webhook events for all precheck and postcheck decisions to enable dashboard integration and audit logging.
 
 ### Event Structure
+
 ```json
 {
   "userId": "user123",
@@ -144,12 +154,15 @@ The service emits fire-and-forget webhook events for all precheck and postcheck 
 ```
 
 ### Configuration
+
 - Set `WEBHOOK_URL` environment variable to enable webhook emission
 - Failed webhook deliveries are written to DLQ file (configurable via `PRECHECK_DLQ`)
 - Webhook includes retry logic with exponential backoff (0.5s, 1s, 2s)
 
 ### Testing
+
 Use the provided webhook test URL for development:
+
 ```bash
 export WEBHOOK_URL="https://webhook-test.com/1508b1ea2414ed242d2b8abf6ea66616"
 ```
@@ -157,14 +170,18 @@ export WEBHOOK_URL="https://webhook-test.com/1508b1ea2414ed242d2b8abf6ea66616"
 ## Policy Configuration
 
 ### Denied Tools
+
 The following tools are automatically denied:
+
 - `python.exec`
 - `bash.exec`
 - `code.exec`
 - `shell.exec`
 
 ### Network Tools
+
 Tools with network scope or web/http prefixes trigger PII redaction:
+
 - `web.*`
 - `http.*`
 - `fetch.*`
@@ -173,18 +190,31 @@ Tools with network scope or web/http prefixes trigger PII redaction:
 
 ## Development
 
+### Development Setup
+
+```bash
+# Install development dependencies
+pip install -r requirements-dev.txt
+
+# Download spaCy model
+python -m spacy download en_core_web_sm
+```
+
 ### Running Tests
+
 ```bash
 pytest tests/
 ```
 
 ### Code Formatting
+
 ```bash
 black app/ tests/
 isort app/ tests/
 ```
 
 ### Type Checking
+
 ```bash
 mypy app/
 ```
@@ -192,12 +222,14 @@ mypy app/
 ## Deployment Modes
 
 ### Cloud Mode
+
 - Bind to `0.0.0.0:8080`
 - Use PostgreSQL database
 - Use Redis for rate limiting
 - Set `PUBLIC_BASE` for external access
 
 ### Local Sidecar Mode
+
 - Bind to `127.0.0.1:7071`
 - Use SQLite database
 - Optional Redis

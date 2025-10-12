@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Simple script to run the GovernsAI Precheck service
+Startup script for GovernsAI Precheck service
 """
 import uvicorn
+import os
 from app.settings import settings
 
 if __name__ == "__main__":
@@ -15,5 +16,5 @@ if __name__ == "__main__":
         host=host,
         port=port,
         reload=settings.debug,
-        log_level="info"
+        log_level="info" if not settings.debug else "debug"
     )
