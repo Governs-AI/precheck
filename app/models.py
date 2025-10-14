@@ -55,6 +55,7 @@ class PrePostCheckRequest(BaseModel):
     raw_text: str  # Raw text input from user
     tags: Optional[List[str]] = None
     corr_id: Optional[str] = None
+    user_id: Optional[str] = None  # Optional - websocket will resolve from API key
     
     # NEW: Policy and tool configuration from agent
     policy_config: Optional[PolicyConfig] = None

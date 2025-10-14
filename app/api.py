@@ -164,9 +164,8 @@ async def metrics():
         media_type=get_metrics_content_type()
     )
 
-@router.post("/v1/u/{user_id}/precheck", response_model=DecisionResponse)
+@router.post("/v1/precheck", response_model=DecisionResponse)
 async def precheck(
-    user_id: str,
     req: PrePostCheckRequest,
     request: Request
 ):
@@ -174,8 +173,12 @@ async def precheck(
     # Extract API key from headers for webhook authentication
     api_key = request.headers.get("X-Governs-Key", "")
     
-    # Rate limiting (100 requests per minute per user)
-    if not rate_limiter.is_allowed(f"precheck:{user_id}", limit=100, window=60):
+    # User ID is optional - websocket will resolve from API key if needed
+    user_id = req.user_id
+    
+    # Rate limiting (100 requests per minute per user/api_key)
+    rate_limit_key = f"precheck:{user_id}" if user_id else f"precheck:key:{api_key}"
+    if not rate_limiter.is_allowed(rate_limit_key, limit=100, window=60):
         raise HTTPException(status_code=429, detail="rate limit exceeded")
     
     # Metrics: Track active requests
@@ -313,9 +316,8 @@ async def precheck(
         # Metrics: Clear active requests
         set_active_requests("precheck", 0)
 
-@router.post("/v1/u/{user_id}/postcheck", response_model=DecisionResponse)
+@router.post("/v1/postcheck", response_model=DecisionResponse)
 async def postcheck(
-    user_id: str,
     req: PrePostCheckRequest,
     request: Request
 ):
@@ -323,8 +325,12 @@ async def postcheck(
     # Extract API key from headers for webhook authentication
     api_key = request.headers.get("X-Governs-Key", "")
     
-    # Rate limiting (100 requests per minute per user)
-    if not rate_limiter.is_allowed(f"postcheck:{user_id}", limit=100, window=60):
+    # User ID is optional - websocket will resolve from API key if needed
+    user_id = req.user_id
+    
+    # Rate limiting (100 requests per minute per user/api_key)
+    rate_limit_key = f"postcheck:{user_id}" if user_id else f"postcheck:key:{api_key}"
+    if not rate_limiter.is_allowed(rate_limit_key, limit=100, window=60):
         raise HTTPException(status_code=429, detail="rate limit exceeded")
     
     # Metrics: Track active requests

@@ -32,7 +32,7 @@ Policy evaluation and PII redaction service for GovernsAI. This service provides
 
 3. **Test the service**:
    ```bash
-   curl -X GET http://localhost:8080/v1/health
+   curl -X GET http://localhost:8080/api/v1/health
    ```
 
 ### Docker
@@ -53,7 +53,7 @@ Policy evaluation and PII redaction service for GovernsAI. This service provides
 ### Health Check
 
 ```http
-GET /v1/health
+GET /api/v1/health
 ```
 
 Returns service status and version information.
@@ -61,17 +61,14 @@ Returns service status and version information.
 ### Precheck
 
 ```http
-POST /v1/u/{user_id}/precheck
+POST /api/v1/precheck
 X-Governs-Key: your-api-key
 Content-Type: application/json
 
 {
   "tool": "web.fetch",
   "scope": "net.external",
-  "payload": {
-    "url": "https://example.com",
-    "email": "user@example.com"
-  },
+  "raw_text": "Please fetch data from https://example.com for user@example.com",
   "tags": ["research"],
   "corr_id": "req-123"
 }
@@ -95,7 +92,9 @@ Content-Type: application/json
 ### Postcheck
 
 ```http
-POST /v1/u/{user_id}/postcheck
+POST /api/v1/postcheck
+X-Governs-Key: your-api-key
+Content-Type: application/json
 ```
 
 Similar to precheck but for post-execution validation.
