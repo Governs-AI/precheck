@@ -122,9 +122,9 @@ The precheck service now supports dynamic policy evaluation where policies are s
 ### OpenAPI Specification
 The complete API specification is available in OpenAPI 3.1.0 format:
 - **File**: `openapi.json` (included in repository)
-- **Interactive Docs**: `http://localhost:8080/docs` (Swagger UI)
-- **Alternative Docs**: `http://localhost:8080/redoc` (ReDoc)
-- **Schema**: `http://localhost:8080/openapi.json` (JSON schema)
+- **Interactive Docs**: `http://localhost:8080/api/docs` (Swagger UI)
+- **Alternative Docs**: `http://localhost:8080/api/redoc` (ReDoc)
+- **Schema**: `http://localhost:8080/api/openapi.json` (JSON schema)
 
 ### Decision Types
 The precheck service returns one of four decision types:
@@ -140,13 +140,13 @@ All API responses include a `policy_id` field that indicates which precedence le
 - **`tool-access`**: TOOL_SPECIFIC level
 - **`defaults`**: GLOBAL_DEFAULTS level
 - **`net-redact-presidio`** or **`net-redact-regex`**: NETWORK_SCOPE level
-- **`default-redact`**: SAFE_FALLBACK level (lowest priority)
+- **`strict-fallback`**: STRICT_FALLBACK level (lowest priority)
 
 ## API Endpoints
 
 ### Health Check
 ```
-GET /v1/health
+GET /api/v1/health
 ```
 
 **Response**:
@@ -160,7 +160,7 @@ GET /v1/health
 
 ### Readiness Check
 ```
-GET /v1/ready
+GET /api/v1/ready
 ```
 
 **Purpose**: Comprehensive readiness check for Kubernetes probes and service validation
@@ -184,7 +184,7 @@ GET /v1/ready
 
 ### Prometheus Metrics
 ```
-GET /metrics
+GET /api/metrics
 ```
 
 **Purpose**: Prometheus metrics endpoint for monitoring and alerting
@@ -193,12 +193,17 @@ GET /metrics
 
 ### Precheck Endpoint
 ```
-POST /v1/u/{user_id}/precheck
+POST /api/v1/precheck
 ```
 
 **Purpose**: Evaluate policy and sanitize raw text before tool execution
 
 **Authentication**: API key passed via `X-Governs-Key` header (forwarded to WebSocket for authentication)
+
+**User ID Handling**: 
+- Optional in request payload (`user_id` field)
+- If not provided, extracted from webhook URL path (`/ws/v1/u/{user_id}/precheck`)
+- Used for rate limiting and audit logging
 
 **Request** (with dynamic policies):
 ```json
@@ -207,6 +212,7 @@ POST /v1/u/{user_id}/precheck
   "scope": "net.external",
   "raw_text": "User email: alice@example.com, SSN: 123-45-6789",
   "corr_id": "req-123",
+  "user_id": "cmfzriaip0000fyp81gjfkri9",
   "tags": ["urgent", "customer"],
   "policy_config": {
     "version": "v1",
@@ -236,6 +242,7 @@ POST /v1/u/{user_id}/precheck
   "scope": "net.external",
   "raw_text": "User email: alice@example.com, SSN: 123-45-6789",
   "corr_id": "req-123",
+  "user_id": "cmfzriaip0000fyp81gjfkri9",
   "tags": ["urgent", "customer"]
 }
 ```
@@ -256,18 +263,20 @@ POST /v1/u/{user_id}/precheck
 
 ### Postcheck Endpoint
 ```
-POST /v1/u/{user_id}/postcheck
+POST /api/v1/postcheck
 ```
 
 **Purpose**: Validate and sanitize raw text after tool execution (egress)
 
 **Authentication**: API key passed via `X-Governs-Key` header (forwarded to WebSocket for authentication)
 
+**User ID Handling**: Same as precheck endpoint
+
 **Request/Response**: Same format as precheck
 
 ### Health Check
 ```
-GET /v1/health
+GET /api/v1/health
 ```
 
 **Response**:
@@ -281,7 +290,7 @@ GET /v1/health
 
 ### Readiness Check
 ```
-GET /v1/ready
+GET /api/v1/ready
 ```
 
 **Purpose**: Comprehensive readiness check for Kubernetes probes and service validation
@@ -333,7 +342,7 @@ GET /v1/ready
 
 ### Prometheus Metrics
 ```
-GET /metrics
+GET /api/metrics
 ```
 
 **Purpose**: Prometheus metrics endpoint for monitoring and alerting
@@ -925,7 +934,7 @@ CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "
 
 #### Test 1: verify_identity tool
 ```bash
-curl -X POST http://localhost:8080/v1/u/u1/precheck \
+curl -X POST http://localhost:8080/api/v1/precheck \
   -H "X-Governs-Key: GAI_LOCAL_DEV_ABC" \
   -H "Content-Type: application/json" \
   -d '{
@@ -952,7 +961,7 @@ curl -X POST http://localhost:8080/v1/u/u1/precheck \
 
 #### Test 2: send_marketing_email tool
 ```bash
-curl -X POST http://localhost:8080/v1/u/u1/precheck \
+curl -X POST http://localhost:8080/api/v1/precheck \
   -H "X-Governs-Key: GAI_LOCAL_DEV_ABC" \
   -H "Content-Type: application/json" \
   -d '{
@@ -979,7 +988,7 @@ curl -X POST http://localhost:8080/v1/u/u1/precheck \
 
 #### Test 3: data_export tool (egress)
 ```bash
-curl -X POST http://localhost:8080/v1/u/u1/postcheck \
+curl -X POST http://localhost:8080/api/v1/postcheck \
   -H "X-Governs-Key: GAI_LOCAL_DEV_ABC" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1006,7 +1015,7 @@ curl -X POST http://localhost:8080/v1/u/u1/postcheck \
 
 #### Test 4: audit_log tool (egress)
 ```bash
-curl -X POST http://localhost:8080/v1/u/u1/postcheck \
+curl -X POST http://localhost:8080/api/v1/postcheck \
   -H "X-Governs-Key: GAI_LOCAL_DEV_ABC" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1032,6 +1041,12 @@ curl -X POST http://localhost:8080/v1/u/u1/postcheck \
 ```
 
 ## Recent Changes Log
+- **2025-01-14**: **API Route Updates**: Simplified API routes and improved user_id handling
+  - **Route Changes**: Added `/api` prefix to all routes (`/api/v1/precheck`, `/api/v1/postcheck`, etc.)
+  - **User ID Handling**: Made `user_id` optional in request payload, with fallback extraction from webhook URL
+  - **Rate Limiting**: Updated to work with either user_id or API key for rate limiting
+  - **WebSocket Integration**: Improved user_id extraction from webhook URL path for WebSocket authentication
+  - **Documentation**: Updated all API examples and test cases to use new route format
 - **2024-12-26**: **BREAKING CHANGE**: Migrated API from payload-based to raw text-based processing
   - **Request Model**: Changed `payload` field to `raw_text` (string) in `PrePostCheckRequest`
   - **Response Model**: Changed `payload_out` field to `raw_text_out` (string) in `DecisionResponse`
