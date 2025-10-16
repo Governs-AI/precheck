@@ -572,7 +572,7 @@ def _evaluate_policy(tool: str, scope: Optional[str], raw_text: str, now: int, d
         }
     
     # PRECEDENCE LEVEL 5: Strict fallback (only block SSN and passwords)
-    return _apply_strict_fallback(raw_text, now)
+    return _apply_strict_fallback(raw_text, now, None, None, None, None)
 
 # NEW: Dynamic policy evaluation using payload-provided policies
 def evaluate_with_payload_policy(
@@ -645,7 +645,7 @@ def _evaluate_dynamic_policy(
         # PRECEDENCE LEVEL 3: Global defaults for this direction
         defaults = policy_config.get("defaults", {})
         default_action = defaults.get(direction, {}).get("action", "redact")
-        return _apply_default_action_dynamic(default_action, raw_text, now, direction, policy_config)
+        return _apply_default_action_dynamic(default_action, raw_text, now, direction, policy_config, user_id, tool_config, budget_context)
         
     except Exception as e:
         # Handle errors based on policy configuration
@@ -830,7 +830,7 @@ def apply_tool_access_text_dynamic(tool: str, findings: List[Dict], raw_text: st
     
     return transformed, reasons
 
-def _apply_default_action_dynamic(action: str, raw_text: str, now: int, direction: str, policy_config: Dict) -> Dict:
+def _apply_default_action_dynamic(action: str, raw_text: str, now: int, direction: str, policy_config: Dict, user_id: Optional[str] = None, tool_config: Optional[Dict] = None, budget_context: Optional[Dict] = None) -> Dict:
     """Apply default action using dynamic configuration"""
     
     if action == "deny":
@@ -882,9 +882,9 @@ def _apply_default_action_dynamic(action: str, raw_text: str, now: int, directio
         }
 
     # PRECEDENCE LEVEL 5: Strict fallback (only block SSN and passwords)
-    return _apply_strict_fallback(raw_text, now)
+    return _apply_strict_fallback(raw_text, now, user_id, tool_config, policy_config, budget_context)
 
-def _apply_strict_fallback(raw_text: str, now: int) -> Dict:
+def _apply_strict_fallback(raw_text: str, now: int, user_id: Optional[str] = None, tool_config: Optional[Dict] = None, policy_config: Optional[Dict] = None, budget_context: Optional[Dict] = None) -> Dict:
     """Apply strict fallback policy - block SSN, passwords, and payment amounts"""
     
     # Check for very strict PII types: SSN, passwords, and payment amounts
@@ -999,7 +999,76 @@ def _apply_strict_fallback(raw_text: str, now: int) -> Dict:
                 })
     
     if strict_pii_findings:
-        # Block the request if strict PII found
+        # Check if this is a payment amount and if budget allows it
+        payment_findings = [f for f in strict_pii_findings if f['type'] == 'PII:payment_amount']
+        
+        if payment_findings and budget_context and policy_config:
+            # Check budget for payment amounts
+            try:
+                from .budget import (
+                    estimate_request_cost, 
+                    get_purchase_amount, 
+                    check_budget_with_context
+                )
+                # Get model from policy config or tool config
+                model = policy_config.get("model", "gpt-4")
+                if tool_config and "metadata" in tool_config:
+                    model = tool_config["metadata"].get("model", model)
+                
+                # Estimate costs
+                estimated_llm_cost = estimate_request_cost(raw_text, model)
+                
+                # Extract purchase amount from text (since it's in the raw text, not metadata)
+                estimated_purchase = None
+                for finding in payment_findings:
+                    try:
+                        # Extract numeric value from the payment text (e.g., "$1" -> 1.0)
+                        import re
+                        amount_match = re.search(r'(\d+(?:\.\d{2})?)', finding['text'])
+                        if amount_match:
+                            estimated_purchase = float(amount_match.group(1))
+                            break
+                    except (ValueError, AttributeError):
+                        continue
+                
+                # Fallback to tool metadata if no amount found in text
+                if estimated_purchase is None and tool_config:
+                    estimated_purchase = get_purchase_amount(tool_config.get("metadata", {}))
+                # Check budget using context
+                budget_status, budget_info = check_budget_with_context(
+                    budget_context=budget_context,
+                    estimated_llm_cost=estimated_llm_cost,
+                    estimated_purchase=estimated_purchase
+                )
+                # Convert to the format expected by the policy evaluation
+                budget_result = {
+                    "allowed": budget_status.allowed,
+                    "reason": budget_status.reason
+                }
+
+                if budget_result["allowed"]:
+                    # Budget allows the purchase, so allow the request
+                    return {
+                        "decision": "allow",
+                        "raw_text_out": raw_text,
+                        "reasons": ["strict_fallback.budget_override"],
+                        "policy_id": "strict-fallback",
+                        "ts": now
+                    }
+                else:
+                    # Budget exceeded, block the request
+                    return {
+                        "decision": "deny",
+                        "raw_text_out": raw_text,
+                        "reasons": [f"budget_exceeded:{budget_result['reason']}"],
+                        "policy_id": "strict-fallback",
+                        "ts": now
+                    }
+            except Exception as e:
+                # If budget check fails, fall back to blocking PII
+                pass
+        
+        # Block the request if strict PII found (and no budget override)
         return {
             "decision": "deny",
             "raw_text_out": raw_text,  # Include original text even when denying
