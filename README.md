@@ -107,7 +107,6 @@ The service can be configured via environment variables:
 | ---------------- | ------------------------- | -------------------------------- |
 | `APP_BIND`       | `0.0.0.0:8080`            | Server bind address              |
 | `DB_URL`         | `sqlite:///./local.db`    | Database connection URL          |
-| `REDIS_URL`      | `None`                    | Redis connection URL (optional)  |
 | `USE_PRESIDIO`   | `true`                    | Enable Presidio PII detection    |
 | `PRESIDIO_MODEL` | `en_core_web_sm`          | spaCy model for Presidio         |
 | `WEBHOOK_URL`    | `None`                    | Webhook URL for dashboard events |
@@ -236,4 +235,4 @@ mypy app/
 
 ## License
 
-MIT License - see LICENSE file for details.
+Elastic License 2.0 - see LICENSE file for details.
