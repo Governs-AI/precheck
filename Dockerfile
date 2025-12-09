@@ -4,6 +4,7 @@ FROM python:3.12-slim
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -16,8 +17,18 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Download spaCy model
-RUN python -m spacy download en_core_web_sm
+# Download spaCy models for Presidio
+RUN python -m spacy download en_core_web_sm && \
+    python -m spacy download en_core_web_lg
+
+# Verify Presidio installation and download required models
+RUN python -c "from presidio_analyzer import AnalyzerEngine; \
+    from presidio_anonymizer import AnonymizerEngine; \
+    print('✅ Presidio installed successfully'); \
+    analyzer = AnalyzerEngine(); \
+    print('✅ Presidio Analyzer initialized'); \
+    anonymizer = AnonymizerEngine(); \
+    print('✅ Presidio Anonymizer initialized')"
 
 # Copy application code
 COPY app ./app
