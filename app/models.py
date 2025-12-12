@@ -35,19 +35,19 @@ class PolicyConfig(BaseModel):
 
 class ToolConfig(BaseModel):
     """Tool-specific configuration"""
-    tool_name: str
+    tool_name: str = ""
     scope: Optional[str] = None
-    direction: str  # "ingress" or "egress"
+    direction: str = "ingress"  # "ingress" or "egress"
     metadata: Dict[str, Any] = {}  # Additional tool metadata
 
 class BudgetContext(BaseModel):
     """Budget context information from agent"""
-    monthly_limit: float
-    current_spend: float
-    llm_spend: float
-    purchase_spend: float
-    remaining_budget: float
-    budget_type: str  # "user" or "organization"
+    monthly_limit: float = 0.0
+    current_spend: float = 0.0
+    llm_spend: float = 0.0
+    purchase_spend: float = 0.0
+    remaining_budget: float = 0.0
+    budget_type: str = "user"  # "user" or "organization"
 
 class PrePostCheckRequest(BaseModel):
     tool: str
