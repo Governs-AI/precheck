@@ -885,199 +885,190 @@ def _apply_default_action_dynamic(action: str, raw_text: str, now: int, directio
     return _apply_strict_fallback(raw_text, now, user_id, tool_config, policy_config, budget_context)
 
 def _apply_strict_fallback(raw_text: str, now: int, user_id: Optional[str] = None, tool_config: Optional[Dict] = None, policy_config: Optional[Dict] = None, budget_context: Optional[Dict] = None) -> Dict:
-    """Apply strict fallback policy - block SSN, passwords, and payment amounts"""
+    """Apply strict fallback policy - redact all PII types (email, phone, SSN, credit card, passwords, payment amounts, etc.)"""
     
-    # Check for very strict PII types: SSN, passwords, and payment amounts
-    strict_pii_findings = []
+    import re
     
+    # Collect all PII findings from the original text
+    all_findings = []
+    
+    # Detect standard PII types using Presidio or regex
     if USE_PRESIDIO and ANALYZER is not None:
-        # Use Presidio to detect only SSN patterns (PASSWORD entity doesn't exist in Presidio)
-        results = ANALYZER.analyze(text=raw_text, entities=["US_SSN"], language="en")
+        # Use Presidio to detect all standard PII types
+        results = ANALYZER.analyze(text=raw_text, entities=list(ANONYMIZE_OPERATORS.keys()), language="en")
         for r in results:
             if not is_false_positive(r.entity_type, "", raw_text):
-                strict_pii_findings.append({
+                all_findings.append({
                     "type": f"PII:{r.entity_type.lower()}",
                     "start": r.start,
                     "end": r.end,
                     "score": r.score,
                     "text": raw_text[r.start:r.end]
                 })
-        
-        # Add password detection using regex even when Presidio is available
-        import re
-        password_pattern = r'\b(?:password|pwd|pass)\s*[:=]\s*\S+'
-        for match in re.finditer(password_pattern, raw_text, re.IGNORECASE):
-            # Check if this match overlaps with any SSN match
-            overlaps_with_ssn = False
-            for ssn_finding in strict_pii_findings:
-                if ssn_finding["type"] == "PII:us_ssn":
-                    # Check if password match overlaps with SSN match
-                    if not (match.end() <= ssn_finding["start"] or match.start() >= ssn_finding["end"]):
-                        overlaps_with_ssn = True
-                        break
-            
-            if not overlaps_with_ssn:
-                strict_pii_findings.append({
-                    "type": "PII:password",
+    else:
+        # Fallback regex detection for email, phone, card
+        if EMAIL.search(raw_text):
+            for match in EMAIL.finditer(raw_text):
+                all_findings.append({
+                    "type": "PII:email_address",
                     "start": match.start(),
                     "end": match.end(),
                     "score": 0.8,
                     "text": match.group()
                 })
-        
-        # Add payment amount detection
-        payment_pattern = r'\$\d+(?:\.\d{2})?|\b\d+(?:\.\d{2})?\s*(?:dollars?|USD|usd)\b|"(?:amount|price|cost)":\s*"?\d+(?:\.\d{2})?"?'
-        for match in re.finditer(payment_pattern, raw_text, re.IGNORECASE):
-            # Check if this match overlaps with any existing findings
-            overlaps = False
-            for finding in strict_pii_findings:
-                if not (match.end() <= finding["start"] or match.start() >= finding["end"]):
-                    overlaps = True
-                    break
-            
-            if not overlaps:
-                strict_pii_findings.append({
-                    "type": "PII:payment_amount",
+        if PHONE.search(raw_text):
+            for match in PHONE.finditer(raw_text):
+                all_findings.append({
+                    "type": "PII:phone_number",
                     "start": match.start(),
                     "end": match.end(),
-                    "score": 0.9,
+                    "score": 0.8,
                     "text": match.group()
                 })
-    else:
-        # Fallback to regex for SSN and password detection
-        import re
-        
-        # SSN pattern (XXX-XX-XXXX)
-        ssn_pattern = r'\b\d{3}-\d{2}-\d{4}\b'
-        for match in re.finditer(ssn_pattern, raw_text):
-            strict_pii_findings.append({
-                "type": "PII:us_ssn",
+        if CARD.search(raw_text):
+            for match in CARD.finditer(raw_text):
+                raw_card = re.sub(r"[^\d]", "", match.group())
+                if 13 <= len(raw_card) <= 19 and luhn_ok(raw_card):
+                    all_findings.append({
+                        "type": "PII:credit_card",
+                        "start": match.start(),
+                        "end": match.end(),
+                        "score": 0.9,
+                        "text": match.group()
+                    })
+    
+    # Additionally detect passwords (not in Presidio) and payment amounts
+    password_findings = []
+    payment_findings = []
+    
+    # Password detection using regex
+    password_pattern = r'\b(?:password|pwd|pass)\s*[:=]\s*\S+'
+    for match in re.finditer(password_pattern, raw_text, re.IGNORECASE):
+        # Check if this overlaps with any existing finding
+        overlaps = False
+        for finding in all_findings:
+            if not (match.end() <= finding["start"] or match.start() >= finding["end"]):
+                overlaps = True
+                break
+        if not overlaps:
+            password_findings.append({
+                "type": "PII:password",
+                "start": match.start(),
+                "end": match.end(),
+                "score": 0.8,
+                "text": match.group()
+            })
+    
+    # Payment amount detection
+    payment_pattern = r'\$\d+(?:\.\d{2})?|\b\d+(?:\.\d{2})?\s*(?:dollars?|USD|usd)\b|"(?:amount|price|cost)":\s*"?\d+(?:\.\d{2})?"?'
+    for match in re.finditer(payment_pattern, raw_text, re.IGNORECASE):
+        # Check if this overlaps with any existing finding
+        overlaps = False
+        for finding in all_findings:
+            if not (match.end() <= finding["start"] or match.start() >= finding["end"]):
+                overlaps = True
+                break
+        if not overlaps:
+            payment_findings.append({
+                "type": "PII:payment_amount",
                 "start": match.start(),
                 "end": match.end(),
                 "score": 0.9,
                 "text": match.group()
             })
-        
-        # Password pattern (basic detection for "password:" or "pwd:")
-        password_pattern = r'\b(?:password|pwd|pass)\s*[:=]\s*\S+'
-        for match in re.finditer(password_pattern, raw_text, re.IGNORECASE):
-            # Check if this match overlaps with any SSN match
-            overlaps_with_ssn = False
-            for ssn_finding in strict_pii_findings:
-                if ssn_finding["type"] == "PII:us_ssn":
-                    # Check if password match overlaps with SSN match
-                    if not (match.end() <= ssn_finding["start"] or match.start() >= ssn_finding["end"]):
-                        overlaps_with_ssn = True
-                        break
-            
-            if not overlaps_with_ssn:
-                strict_pii_findings.append({
-                    "type": "PII:password",
-                    "start": match.start(),
-                    "end": match.end(),
-                    "score": 0.8,
-                    "text": match.group()
-                })
-        
-        # Payment amount pattern
-        payment_pattern = r'\$\d+(?:\.\d{2})?|\b\d+(?:\.\d{2})?\s*(?:dollars?|USD|usd)\b|"(?:amount|price|cost)":\s*"?\d+(?:\.\d{2})?"?'
-        for match in re.finditer(payment_pattern, raw_text, re.IGNORECASE):
-            # Check if this match overlaps with any existing findings
-            overlaps = False
-            for finding in strict_pii_findings:
-                if not (match.end() <= finding["start"] or match.start() >= finding["end"]):
-                    overlaps = True
-                    break
-            
-            if not overlaps:
-                strict_pii_findings.append({
-                    "type": "PII:payment_amount",
-                    "start": match.start(),
-                    "end": match.end(),
-                    "score": 0.9,
-                    "text": match.group()
-                })
     
-    if strict_pii_findings:
-        # Check if this is a payment amount and if budget allows it
-        payment_findings = [f for f in strict_pii_findings if f['type'] == 'PII:payment_amount']
-        
-        if payment_findings and budget_context and policy_config:
-            # Check budget for payment amounts
-            try:
-                from .budget import (
-                    estimate_request_cost, 
-                    get_purchase_amount, 
-                    check_budget_with_context
-                )
-                # Get model from policy config or tool config
-                model = policy_config.get("model", "gpt-4")
-                if tool_config and "metadata" in tool_config:
-                    model = tool_config["metadata"].get("model", model)
-                
-                # Estimate costs
-                estimated_llm_cost = estimate_request_cost(raw_text, model)
-                
-                # Extract purchase amount from text (since it's in the raw text, not metadata)
-                estimated_purchase = None
-                for finding in payment_findings:
-                    try:
-                        # Extract numeric value from the payment text (e.g., "$1" -> 1.0)
-                        import re
-                        amount_match = re.search(r'(\d+(?:\.\d{2})?)', finding['text'])
-                        if amount_match:
-                            estimated_purchase = float(amount_match.group(1))
-                            break
-                    except (ValueError, AttributeError):
-                        continue
-                
-                # Fallback to tool metadata if no amount found in text
-                if estimated_purchase is None and tool_config:
-                    estimated_purchase = get_purchase_amount(tool_config.get("metadata", {}))
-                # Check budget using context
-                budget_status, budget_info = check_budget_with_context(
-                    budget_context=budget_context,
-                    estimated_llm_cost=estimated_llm_cost,
-                    estimated_purchase=estimated_purchase
-                )
-                # Convert to the format expected by the policy evaluation
-                budget_result = {
-                    "allowed": budget_status.allowed,
-                    "reason": budget_status.reason
+    # Check budget for payment amounts if available
+    if payment_findings and budget_context and policy_config:
+        try:
+            from .budget import (
+                estimate_request_cost, 
+                get_purchase_amount, 
+                check_budget_with_context
+            )
+            # Get model from policy config or tool config
+            model = policy_config.get("model", "gpt-4")
+            if tool_config and "metadata" in tool_config:
+                model = tool_config["metadata"].get("model", model)
+            
+            # Estimate costs
+            estimated_llm_cost = estimate_request_cost(raw_text, model)
+            
+            # Extract purchase amount from text
+            estimated_purchase = None
+            for finding in payment_findings:
+                try:
+                    amount_match = re.search(r'(\d+(?:\.\d{2})?)', finding['text'])
+                    if amount_match:
+                        estimated_purchase = float(amount_match.group(1))
+                        break
+                except (ValueError, AttributeError):
+                    continue
+            
+            # Fallback to tool metadata if no amount found in text
+            if estimated_purchase is None and tool_config:
+                estimated_purchase = get_purchase_amount(tool_config.get("metadata", {}))
+            
+            # Check budget using context
+            budget_status, budget_info = check_budget_with_context(
+                budget_context=budget_context,
+                estimated_llm_cost=estimated_llm_cost,
+                estimated_purchase=estimated_purchase
+            )
+            
+            if not budget_status.allowed:
+                # Budget exceeded, block the request
+                return {
+                    "decision": "deny",
+                    "raw_text_out": raw_text,
+                    "reasons": [f"budget_exceeded:{budget_status.reason}"],
+                    "policy_id": "strict-fallback",
+                    "ts": now
                 }
-
-                if budget_result["allowed"]:
-                    # Budget allows the purchase, so allow the request
-                    return {
-                        "decision": "allow",
-                        "raw_text_out": raw_text,
-                        "reasons": ["strict_fallback.budget_override"],
-                        "policy_id": "strict-fallback",
-                        "ts": now
-                    }
-                else:
-                    # Budget exceeded, block the request
-                    return {
-                        "decision": "deny",
-                        "raw_text_out": raw_text,
-                        "reasons": [f"budget_exceeded:{budget_result['reason']}"],
-                        "policy_id": "strict-fallback",
-                        "ts": now
-                    }
-            except Exception as e:
-                # If budget check fails, fall back to blocking PII
-                pass
+        except Exception as e:
+            # If budget check fails, continue with PII redaction
+            pass
+    
+    # Add password and payment findings to all findings
+    all_findings.extend(password_findings)
+    all_findings.extend(payment_findings)
+    
+    # If any PII found, redact all of it
+    if all_findings:
+        # Sort findings by start position (reverse order for safe replacement)
+        sorted_findings = sorted(all_findings, key=lambda x: x["start"], reverse=True)
+        redacted_text = raw_text
+        reasons = []
         
-        # Block the request if strict PII found (and no budget override)
+        for finding in sorted_findings:
+            pii_type = finding["type"]
+            start = finding["start"]
+            end = finding["end"]
+            
+            # Determine placeholder based on type
+            if pii_type == "PII:password":
+                placeholder = "<PASSWORD>"
+            elif pii_type == "PII:payment_amount":
+                placeholder = "<PAYMENT_AMOUNT>"
+            elif pii_type.startswith("PII:"):
+                # Use entity type to get placeholder
+                entity_type = pii_type.replace("PII:", "").upper()
+                placeholder = entity_type_to_placeholder(entity_type)
+            else:
+                placeholder = "<REDACTED>"
+            
+            # Replace in text
+            redacted_text = redacted_text[:start] + placeholder + redacted_text[end:]
+            reasons.append(f"pii.redacted:{pii_type.replace('PII:', '')}")
+        
         return {
-            "decision": "deny",
-            "raw_text_out": raw_text,  # Include original text even when denying
-            "reasons": [f"strict_pii_blocked:{finding['type']}" for finding in strict_pii_findings],
+            "decision": "transform",
+            "raw_text_out": redacted_text,
+            "reasons": sorted(set(reasons)),
             "policy_id": "strict-fallback",
             "ts": now
         }
     else:
-        # Allow the request if no strict PII found
+        # No PII found - allow the request
         return {
             "decision": "allow",
             "raw_text_out": raw_text,
