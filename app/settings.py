@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     # API configuration
     api_key_header: str = "X-Governs-Key"
     demo_api_key: str = "GAI_LOCAL_DEV_ABC"
+    api_key: Optional[str] = None  # API key from .env file
     
     # Webhook configuration
     webhook_url: Optional[str] = None

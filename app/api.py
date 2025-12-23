@@ -17,6 +17,27 @@ import json
 from datetime import datetime
 from typing import List, Tuple, Optional
 
+def get_api_key(request: Request) -> Optional[str]:
+    """
+    Get API key with fallback priority:
+    1. From .env file (API_KEY)
+    2. From request header (X-Governs-Key)
+    3. No key (skip webhook URL)
+    
+    Returns None if no API key is found (optional authentication)
+    """
+    # Priority 1: Check .env file
+    if settings.api_key:
+        return settings.api_key
+    
+    # Priority 2: Check request header
+    api_key = request.headers.get(settings.api_key_header, "")
+    if api_key:
+        return api_key
+    
+    # No API key found - return None (optional authentication)
+    return None
+
 router = APIRouter()
 
 def extract_pii_info_from_reasons(reasons: Optional[List[str]]) -> Tuple[List[str], float]:
@@ -170,14 +191,19 @@ async def precheck(
     request: Request
 ):
     """Precheck endpoint for policy evaluation and PII redaction"""
-    # Extract API key from headers for webhook authentication
-    api_key = request.headers.get("X-Governs-Key", "")
+    # Get API key with fallback: header → .env → webhook URL
+    api_key = get_api_key(request)
     
     # User ID is optional - websocket will resolve from API key if needed
     user_id = req.user_id
     
     # Rate limiting (100 requests per minute per user/api_key)
-    rate_limit_key = f"precheck:{user_id}" if user_id else f"precheck:key:{api_key}"
+    if user_id:
+        rate_limit_key = f"precheck:{user_id}"
+    elif api_key:
+        rate_limit_key = f"precheck:key:{api_key}"
+    else:
+        rate_limit_key = "precheck:anonymous"
     if not rate_limiter.is_allowed(rate_limit_key, limit=100, window=60):
         raise HTTPException(status_code=429, detail="rate limit exceeded")
     
@@ -245,8 +271,11 @@ async def precheck(
         # Extract PII information from reasons
         pii_types, confidence = extract_pii_info_from_reasons(result.get("reasons", []))
         
-        # Get webhook configuration from URL
+        # Get webhook configuration from URL (fallback if no API key from header/env)
         webhook_org_id, webhook_channel, webhook_api_key = get_webhook_config()
+        
+        # Use API key from request if available, otherwise fall back to webhook API key
+        final_api_key = api_key or webhook_api_key or ""
         
         # Build event (always send, even if orgId or channel are None)
         event = {
@@ -275,7 +304,7 @@ async def precheck(
                 "ts": f"{datetime.fromtimestamp(start_ts).isoformat()}Z",
                 "authentication": {
                     "userId": user_id,
-                    "apiKey": api_key
+                    "apiKey": final_api_key
                 }
             }
         }
@@ -322,14 +351,19 @@ async def postcheck(
     request: Request
 ):
     """Postcheck endpoint for post-execution validation"""
-    # Extract API key from headers for webhook authentication
-    api_key = request.headers.get("X-Governs-Key", "")
+    # Get API key with fallback: header → .env → webhook URL
+    api_key = get_api_key(request)
     
     # User ID is optional - websocket will resolve from API key if needed
     user_id = req.user_id
     
     # Rate limiting (100 requests per minute per user/api_key)
-    rate_limit_key = f"postcheck:{user_id}" if user_id else f"postcheck:key:{api_key}"
+    if user_id:
+        rate_limit_key = f"postcheck:{user_id}"
+    elif api_key:
+        rate_limit_key = f"postcheck:key:{api_key}"
+    else:
+        rate_limit_key = "postcheck:anonymous"
     if not rate_limiter.is_allowed(rate_limit_key, limit=100, window=60):
         raise HTTPException(status_code=429, detail="rate limit exceeded")
     
@@ -396,8 +430,11 @@ async def postcheck(
         # Extract PII information from reasons
         pii_types, confidence = extract_pii_info_from_reasons(result.get("reasons", []))
         
-        # Get webhook configuration from URL
+        # Get webhook configuration from URL (fallback if no API key from header/env)
         webhook_org_id, webhook_channel, webhook_api_key = get_webhook_config()
+        
+        # Use API key from request if available, otherwise fall back to webhook API key
+        final_api_key = api_key or webhook_api_key or ""
         
         # Build event (always send, even if orgId or channel are None)
         event = {
@@ -426,7 +463,7 @@ async def postcheck(
                 "ts": f"{datetime.fromtimestamp(start_ts).isoformat()}Z",
                 "authentication": {
                     "userId": user_id,
-                    "apiKey": api_key
+                    "apiKey": final_api_key
                 }
             }
         }
