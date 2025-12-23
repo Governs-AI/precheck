@@ -718,9 +718,63 @@ def _apply_tool_specific_policy_dynamic(tool: str, raw_text: str, now: int, tool
                     "text": raw_text[r.start:r.end]
                 })
     
+
+    import re
+    ssn_patterns = [
+        r'\b\d{3}-\d{2}-\d{4}\b',  # XXX-XX-XXXX with dashes
+        r'\b(?!000|666|9\d{2})\d{3}[-]?(?!00)\d{2}[-]?(?!0000)\d{4}\b',  # With optional dashes
+        r'\b(?!000|666|9\d{2})\d{9}\b'  # 9 digits without dashes (if context suggests SSN)
+    ]
+    
+    # Check if text contains SSN-related context
+    ssn_context = re.search(r'\b(ssn|social\s*security|tax\s*id|social\s*security\s*number)\b', raw_text, re.IGNORECASE)
+    
+    for pattern in ssn_patterns:
+        for match in re.finditer(pattern, raw_text):
+            # Check if this SSN overlaps with any existing finding
+            overlaps = False
+            for finding in findings:
+                if not (match.end() <= finding["start"] or match.start() >= finding["end"]):
+                    overlaps = True
+                    break
+            
+            # Only add if no overlap and (has context or is in standard format)
+            if not overlaps and (ssn_context or '-' in match.group()):
+                # Check if it's already detected as US_SSN
+                already_detected = False
+                for finding in findings:
+                    if finding["type"] == "PII:us_ssn" and finding["start"] == match.start():
+                        already_detected = True
+                        break
+                
+                if not already_detected:
+                    findings.append({
+                        "type": "PII:us_ssn",
+                        "start": match.start(),
+                        "end": match.end(),
+                        "score": 0.9 if ssn_context else 0.7,
+                        "text": match.group()
+                    })
+                    break  # Only add first match per pattern
+    
     # Apply tool-specific transformations based on findings and allow_pii rules
     if findings:
         allow_pii = tool_policy.get("allow_pii", {})
+        
+        # Check if any PII type is set to "block" - if so, deny the entire request
+        for finding in findings:
+            pii_type = finding["type"]
+            action = allow_pii.get(pii_type, "redact")
+            if action == "block" or action == "deny":
+                return {
+                    "decision": "deny",
+                    "raw_text_out": raw_text,
+                    "reasons": [f"pii.blocked:{pii_type.replace('PII:', '')}"],
+                    "policy_id": "tool-access",
+                    "ts": now
+                }
+        
+        # No blocking actions, apply transformations
         transformed_text, tool_reasons = apply_tool_access_text_dynamic(tool, findings, raw_text, allow_pii)
         return {
             "decision": "transform",
