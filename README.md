@@ -1,6 +1,8 @@
 # GovernsAI Precheck
 
-Policy evaluation and PII redaction service for GovernsAI. This service provides real-time policy evaluation and PII detection/redaction for AI tool usage.
+**Fully Open Source (MIT)** - PII detection and policy evaluation service for AI applications.
+
+This service provides real-time policy evaluation and PII detection/redaction for AI tool usage. You can use it, modify it, and even offer it as a hosted service - no restrictions.
 
 ## Features
 
@@ -235,4 +237,30 @@ mypy app/
 
 ## License
 
-Elastic License 2.0 - see LICENSE file for details.
+**MIT License** - Fully open source, no restrictions.
+
+### What You Can Do:
+- ✅ **Use in production** - Deploy for your organization
+- ✅ **Host as a service** - Offer "Precheck-as-a-Service" to customers
+- ✅ **Modify freely** - Customize for your needs
+- ✅ **Bundle with products** - Integrate into your software
+- ✅ **No attribution required** - Use without mentioning GovernsAI (though we'd appreciate it!)
+
+### Why MIT?
+We want Precheck to become the standard for AI governance. Making it fully open source (not just source-available) means:
+- No legal friction for enterprise adoption
+- Can be integrated into any project (open or proprietary)
+- Community can build on and extend it
+- You can run it anywhere, anytime, for any purpose
+
+See [LICENSE](LICENSE) file for full legal text.
+
+## Part of GovernsAI Open-Core
+
+Precheck is the core of the GovernsAI ecosystem:
+- **Precheck Service** (this package) - MIT (fully open source)
+- **TypeScript SDK** - MIT
+- **Browser Extension** - MIT
+- **Platform Console** - ELv2 (source-available for self-hosting)
+
+Learn more: [GovernsAI Licensing](https://docs.governsai.com/licensing)
