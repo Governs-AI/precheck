@@ -53,6 +53,7 @@ class PrePostCheckRequest(BaseModel):
     tool: str
     scope: Optional[str] = None
     raw_text: str  # Raw text input from user
+    image_data: Optional[str] = None  # Base64 encoded image data
     tags: Optional[List[str]] = None
     corr_id: Optional[str] = None
     user_id: Optional[str] = None  # Optional - websocket will resolve from API key

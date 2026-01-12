@@ -11,6 +11,7 @@ from presidio_analyzer.nlp_engine import SpacyNlpEngine
 from presidio_analyzer import RecognizerRegistry
 from presidio_anonymizer.entities import OperatorConfig
 from .settings import settings
+from .ocr import extract_text_from_image
 
 # Fallback regex patterns for when Presidio is not available
 EMAIL = re.compile(r"\b([A-Za-z0-9._%+-])[^@\s]*(@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\b")
@@ -116,6 +117,13 @@ ANONYMIZE_OPERATORS = {
     "US_SSN": OperatorConfig("mask", {"masking_char": "*", "chars_to_mask": 4, "from_end": True}),
     "API_KEY": OperatorConfig("replace", {"new_value": "[REDACTED_API_KEY]"}),
     "JWT_TOKEN": OperatorConfig("replace", {"new_value": "[REDACTED_JWT]"}),
+    "DATE_TIME": OperatorConfig("replace", {"new_value": "[REDACTED_DATE]"}),
+    "LOCATION": OperatorConfig("replace", {"new_value": "[REDACTED_LOCATION]"}),
+    "PERSON": OperatorConfig("replace", {"new_value": "[REDACTED_PERSON]"}),
+    "MEDICAL_LICENSE": OperatorConfig("replace", {"new_value": "[REDACTED_MEDICAL_ID]"}),
+    "US_DRIVER_LICENSE": OperatorConfig("replace", {"new_value": "[REDACTED_DRIVER_LICENSE]"}),
+    "CRYPTO": OperatorConfig("replace", {"new_value": "[REDACTED_CRYPTO_WALLET]"}),
+    "URL": OperatorConfig("replace", {"new_value": "[REDACTED_URL]"}),
 }
 
 def entity_type_to_placeholder(entity_type: str) -> str:
@@ -129,6 +137,13 @@ def entity_type_to_placeholder(entity_type: str) -> str:
         "IBAN_CODE": "<USER_IBAN>",
         "API_KEY": "<API_KEY>",
         "JWT_TOKEN": "<JWT_TOKEN>",
+        "DATE_TIME": "<DATE>",
+        "LOCATION": "<LOCATION>",
+        "PERSON": "<PERSON_NAME>",
+        "MEDICAL_LICENSE": "<MEDICAL_ID>",
+        "US_DRIVER_LICENSE": "<DRIVER_LICENSE>",
+        "CRYPTO": "<CRYPTO_WALLET>",
+        "URL": "<URL>",
     }
     return entity_mapping.get(entity_type, f"<USER_{entity_type}>")
 
@@ -584,12 +599,22 @@ def evaluate_with_payload_policy(
     policy_config: Optional[Dict] = None,
     tool_config: Optional[Dict] = None,
     user_id: Optional[str] = None,
-    budget_context: Optional[Dict] = None
+    budget_context: Optional[Dict] = None,
+    image_data: Optional[str] = None
 ) -> Dict:
     """
     Evaluate policy using payload-provided configuration
     Falls back to static YAML if no policy_config provided
     """
+    
+    # Process image if present
+    if image_data:
+        extracted_text = extract_text_from_image(image_data)
+        if extracted_text:
+            if raw_text:
+                raw_text += "\n\n[OCR EXTRACTED TEXT]\n" + extracted_text
+            else:
+                raw_text = "[OCR EXTRACTED TEXT]\n" + extracted_text
     
     if not policy_config:
         # Fallback to current YAML-based logic
