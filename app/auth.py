@@ -1,5 +1,6 @@
 from fastapi import Header, HTTPException, Depends
 from sqlalchemy.orm import Session
+from datetime import datetime
 from typing import Optional
 from .storage import get_db, APIKey
 
@@ -16,5 +17,8 @@ async def require_api_key(
 
     if record is None or not record.is_active:
         raise HTTPException(status_code=401, detail="invalid api key")
+
+    if record.expires_at is not None and record.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=401, detail="api key expired")
 
     return x_governs_key
