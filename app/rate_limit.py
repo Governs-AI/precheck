@@ -1,7 +1,10 @@
 import redis
+import logging
 import time
 from typing import Optional
 from .settings import settings
+
+logger = logging.getLogger(__name__)
 
 class RateLimiter:
     """Redis-based token bucket rate limiter"""
@@ -14,7 +17,7 @@ class RateLimiter:
                 # Test connection
                 self.redis_client.ping()
             except Exception as e:
-                print(f"Failed to connect to Redis: {e}")
+                logger.warning("Failed to connect to Redis: %s", type(e).__name__)
                 self.redis_client = None
     
     def is_allowed(self, key: str, limit: int, window: int) -> bool:
@@ -58,7 +61,7 @@ class RateLimiter:
             return current_count < limit
             
         except Exception as e:
-            print(f"Rate limiting error: {e}")
+            logger.warning("Rate limiting error: %s", type(e).__name__)
             # Fail open - allow request if Redis is down
             return True
 

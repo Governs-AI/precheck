@@ -6,7 +6,21 @@ from .api import router
 from .storage import create_tables
 from .settings import settings
 import logging
+import sys
 import json
+
+def _configure_logging() -> None:
+    """Set up JSON structured logging. Debug level gated behind settings.debug."""
+    level = logging.DEBUG if settings.debug else logging.INFO
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(
+        logging.Formatter(
+            '{"time":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","message":"%(message)s"}',
+            datefmt="%Y-%m-%dT%H:%M:%S",
+        )
+    )
+    logging.basicConfig(level=level, handlers=[handler], force=True)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -22,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 def create_app() -> FastAPI:
     """Create and configure FastAPI application"""
+    _configure_logging()
     app = FastAPI(
         title="GovernsAI Precheck",
         version="0.0.1",
