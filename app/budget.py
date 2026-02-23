@@ -56,7 +56,16 @@ def get_purchase_amount(tool_config: Dict[str, Any]) -> Optional[float]:
     return None
 
 def get_user_budget(user_id: str, db: Session) -> Budget:
-    """Get or create budget for user"""
+    """Get or create budget for user.
+
+    .. deprecated::
+        Budget state is now owned by the Console (governsai-console).
+        Use ``check_budget_with_context`` with a ``budget_context`` payload
+        sourced from the Console's ``/api/v1/budget/context`` endpoint instead.
+        This function operates against Precheck's local Budget table which may
+        disagree with Console; it exists only for backwards-compatibility with
+        standalone deployments and will be removed in a future release.
+    """
     budget = db.query(Budget).filter(Budget.user_id == user_id).first()
     
     if not budget:
@@ -145,12 +154,19 @@ def check_budget_with_context(
     return budget_status, budget_info
 
 def check_budget(
-    user_id: str, 
-    estimated_llm_cost: float, 
+    user_id: str,
+    estimated_llm_cost: float,
     estimated_purchase: Optional[float] = None,
     db: Optional[Session] = None
 ) -> Tuple[BudgetStatus, BudgetInfo]:
-    """Check if request is within budget limits"""
+    """Check if request is within budget limits (local-DB path).
+
+    .. deprecated::
+        Prefer ``check_budget_with_context`` which uses budget state supplied
+        by the Console.  This function reads from Precheck's local Budget table
+        and can produce results that disagree with Console when both services
+        are deployed together.  It will be removed in a future release.
+    """
     
     if db is None:
         db = next(get_db())
