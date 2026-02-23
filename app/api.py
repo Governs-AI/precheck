@@ -303,7 +303,7 @@ async def precheck(
                 "ts": f"{datetime.fromtimestamp(start_ts).isoformat()}Z",
                 "authentication": {
                     "userId": user_id,
-                    "apiKey": final_api_key
+                    "apiKeyId": hashlib.sha256(final_api_key.encode()).hexdigest()[:16] if final_api_key else None,
                 }
             }
         }
@@ -436,7 +436,7 @@ async def postcheck(
                 "ts": f"{datetime.fromtimestamp(start_ts).isoformat()}Z",
                 "authentication": {
                     "userId": user_id,
-                    "apiKey": final_api_key
+                    "apiKeyId": hashlib.sha256(final_api_key.encode()).hexdigest()[:16] if final_api_key else None,
                 }
             }
         }
