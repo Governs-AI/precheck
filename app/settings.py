@@ -37,7 +37,9 @@ class Settings(BaseSettings):
     webhook_max_retries: int = 3
     webhook_backoff_base_ms: int = 150
 
-    # PII tokenization — REQUIRED in production; must not be the default value
+    # PII tokenization — REQUIRED in production; must not be the default value.
+    # WARNING: any PII tokens previously generated with the default salt are
+    # cryptographically weak and must be re-tokenised after rotating this value.
     pii_token_salt: str = _DEFAULT_SALT
 
     # Error handling behavior
