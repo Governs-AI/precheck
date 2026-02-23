@@ -13,6 +13,7 @@ from .metrics import (
 from .settings import settings
 from .auth import require_api_key
 from .storage import get_db, APIKey
+import logging
 import time
 import asyncio
 import hashlib
@@ -20,6 +21,8 @@ import json
 import secrets
 from datetime import datetime
 from typing import List, Tuple, Optional
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -232,21 +235,8 @@ async def precheck(
     start_ts = int(start_time)
     
     try:
-        # DEBUG: Print entire request payload for debugging
-        print("=" * 80)
-        print("🔍 PRECHECK REQUEST DEBUG")
-        print("=" * 80)
-        print(f"User ID: {user_id}")
-        print(f"Tool: {req.tool}")
-        print(f"Scope: {req.scope}")
-        print(f"Raw Text: {req.raw_text}")
-        print(f"Correlation ID: {req.corr_id}")
-        print(f"Tags: {req.tags}")
-        print(f"Policy Config: {req.policy_config.model_dump() if req.policy_config else None}")
-        print(f"Tool Config: {req.tool_config.model_dump() if req.tool_config else None}")
-        print(f"Budget Context: {req.budget_context.model_dump() if req.budget_context else None}")
-        print("=" * 80)
-        
+        logger.debug("precheck request", extra={"tool": req.tool, "corr_id": req.corr_id})
+
         # Use new policy evaluation with payload policies
         policy_config = req.policy_config.model_dump() if req.policy_config else None
         tool_config = req.tool_config.model_dump() if req.tool_config else None
@@ -268,20 +258,11 @@ async def precheck(
             from .policies import _add_budget_info_to_result
             result = _add_budget_info_to_result(result, user_id, req.tool, req.raw_text, tool_config, policy_config, budget_context)
         
-        # DEBUG: Print policy evaluation result
-        print("🔍 POLICY EVALUATION RESULT")
-        print("-" * 40)
-        print(f"Decision: {result['decision']}")
-        print(f"Policy ID: {result.get('policy_id', 'unknown')}")
-        print(f"Reasons: {result.get('reasons', [])}")
-        print(f"Raw Text Out: {result.get('raw_text_out', 'N/A')}")
-        print("-" * 40)
-        
         # Metrics: Record policy evaluation
         policy_eval_duration = time.time() - start_time
         record_policy_evaluation(
             tool=req.tool,
-            direction="ingress", 
+            direction="ingress",
             policy_id=result.get("policy_id", "unknown"),
             duration=policy_eval_duration
         )
@@ -387,20 +368,8 @@ async def postcheck(
     start_ts = int(start_time)
     
     try:
-        # DEBUG: Print entire request payload for debugging
-        print("=" * 80)
-        print("🔍 POSTCHECK REQUEST DEBUG")
-        print("=" * 80)
-        print(f"User ID: {user_id}")
-        print(f"Tool: {req.tool}")
-        print(f"Scope: {req.scope}")
-        print(f"Raw Text: {req.raw_text}")
-        print(f"Correlation ID: {req.corr_id}")
-        print(f"Tags: {req.tags}")
-        print(f"Policy Config: {req.policy_config.model_dump() if req.policy_config else None}")
-        print(f"Tool Config: {req.tool_config.model_dump() if req.tool_config else None}")
-        print("=" * 80)
-        
+        logger.debug("postcheck request", extra={"tool": req.tool, "corr_id": req.corr_id})
+
         # Use new policy evaluation with payload policies
         policy_config = req.policy_config.model_dump() if req.policy_config else None
         tool_config = req.tool_config.model_dump() if req.tool_config else None
@@ -421,15 +390,6 @@ async def postcheck(
         if user_id and tool_config and policy_config and budget_context:
             from .policies import _add_budget_info_to_result
             result = _add_budget_info_to_result(result, user_id, req.tool, req.raw_text, tool_config, policy_config, budget_context)
-        
-        # DEBUG: Print policy evaluation result
-        print("🔍 POLICY EVALUATION RESULT")
-        print("-" * 40)
-        print(f"Decision: {result['decision']}")
-        print(f"Policy ID: {result.get('policy_id', 'unknown')}")
-        print(f"Reasons: {result.get('reasons', [])}")
-        print(f"Raw Text Out: {result.get('raw_text_out', 'N/A')}")
-        print("-" * 40)
         
         # Metrics: Record policy evaluation
         policy_eval_duration = time.time() - start_time
