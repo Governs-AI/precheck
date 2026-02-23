@@ -16,11 +16,12 @@ class User(Base):
 
 class APIKey(Base):
     __tablename__ = "api_keys"
-    
+
     key = Column(String, primary_key=True)
     user_id = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     is_active = Column(Boolean, default=True)
+    expires_at = Column(DateTime, nullable=True)  # None means the key never expires
 
 class Policy(Base):
     __tablename__ = "policies"

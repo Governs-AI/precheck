@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Response, Request
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Response, Depends
+from sqlalchemy.orm import Session
 from .models import PrePostCheckRequest, DecisionResponse
 from .policies import evaluate, evaluate_with_payload_policy
 from .rate_limit import rate_limiter
@@ -10,33 +11,15 @@ from .metrics import (
     set_active_requests
 )
 from .settings import settings
+from .auth import require_api_key
+from .storage import get_db, APIKey
 import time
 import asyncio
 import hashlib
 import json
+import secrets
 from datetime import datetime
 from typing import List, Tuple, Optional
-
-def get_api_key(request: Request) -> Optional[str]:
-    """
-    Get API key with fallback priority:
-    1. From .env file (API_KEY)
-    2. From request header (X-Governs-Key)
-    3. No key (skip webhook URL)
-    
-    Returns None if no API key is found (optional authentication)
-    """
-    # Priority 1: Check .env file
-    if settings.api_key:
-        return settings.api_key
-    
-    # Priority 2: Check request header
-    api_key = request.headers.get(settings.api_key_header, "")
-    if api_key:
-        return api_key
-    
-    # No API key found - return None (optional authentication)
-    return None
 
 router = APIRouter()
 
@@ -71,6 +54,46 @@ def extract_pii_info_from_reasons(reasons: Optional[List[str]]) -> Tuple[List[st
     avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0.95
     
     return pii_types, avg_confidence
+
+@router.post("/v1/keys/rotate")
+async def rotate_api_key(
+    api_key: str = Depends(require_api_key),
+    db: Session = Depends(get_db),
+):
+    """Rotate the authenticated API key: create a new key and deactivate the old one."""
+    record = db.query(APIKey).filter(APIKey.key == api_key).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="key not found")
+
+    new_key_value = "GAI_" + secrets.token_urlsafe(32)
+    new_record = APIKey(
+        key=new_key_value,
+        user_id=record.user_id,
+        is_active=True,
+        expires_at=record.expires_at,
+    )
+    db.add(new_record)
+    record.is_active = False
+    db.commit()
+
+    return {"key": new_key_value, "user_id": record.user_id}
+
+
+@router.post("/v1/keys/revoke")
+async def revoke_api_key(
+    api_key: str = Depends(require_api_key),
+    db: Session = Depends(get_db),
+):
+    """Revoke the authenticated API key (deactivates it immediately)."""
+    record = db.query(APIKey).filter(APIKey.key == api_key).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="key not found")
+
+    record.is_active = False
+    db.commit()
+
+    return {"revoked": True}
+
 
 @router.get("/v1/health")
 async def health():
@@ -188,22 +211,17 @@ async def metrics():
 @router.post("/v1/precheck", response_model=DecisionResponse)
 async def precheck(
     req: PrePostCheckRequest,
-    request: Request
+    api_key: str = Depends(require_api_key)
 ):
     """Precheck endpoint for policy evaluation and PII redaction"""
-    # Get API key with fallback: header → .env → webhook URL
-    api_key = get_api_key(request)
-    
     # User ID is optional - websocket will resolve from API key if needed
     user_id = req.user_id
-    
+
     # Rate limiting (100 requests per minute per user/api_key)
     if user_id:
         rate_limit_key = f"precheck:{user_id}"
-    elif api_key:
-        rate_limit_key = f"precheck:key:{api_key}"
     else:
-        rate_limit_key = "precheck:anonymous"
+        rate_limit_key = f"precheck:key:{api_key}"
     if not rate_limiter.is_allowed(rate_limit_key, limit=100, window=60):
         raise HTTPException(status_code=429, detail="rate limit exceeded")
     
@@ -348,22 +366,17 @@ async def precheck(
 @router.post("/v1/postcheck", response_model=DecisionResponse)
 async def postcheck(
     req: PrePostCheckRequest,
-    request: Request
+    api_key: str = Depends(require_api_key)
 ):
     """Postcheck endpoint for post-execution validation"""
-    # Get API key with fallback: header → .env → webhook URL
-    api_key = get_api_key(request)
-    
     # User ID is optional - websocket will resolve from API key if needed
     user_id = req.user_id
-    
+
     # Rate limiting (100 requests per minute per user/api_key)
     if user_id:
         rate_limit_key = f"postcheck:{user_id}"
-    elif api_key:
-        rate_limit_key = f"postcheck:key:{api_key}"
     else:
-        rate_limit_key = "postcheck:anonymous"
+        rate_limit_key = f"postcheck:key:{api_key}"
     if not rate_limiter.is_allowed(rate_limit_key, limit=100, window=60):
         raise HTTPException(status_code=429, detail="rate limit exceeded")
     
