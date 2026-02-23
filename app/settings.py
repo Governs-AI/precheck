@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     use_presidio: bool = True
     presidio_model: str = "en_core_web_sm"  # sm, md, lg
 
-    # API configuration
+    # API configuration — demo_api_key intentionally removed; all keys must live in DB
     api_key_header: str = "X-Governs-Key"
 
     # Webhook configuration
