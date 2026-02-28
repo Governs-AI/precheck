@@ -16,6 +16,34 @@ from .settings import settings
 EMAIL = re.compile(r"\b([A-Za-z0-9._%+-])[^@\s]*(@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\b")
 PHONE = re.compile(r"\+?\d[\d\s\-\(\)]{7,}\d")
 CARD = re.compile(r"\b(?:\d[ -]*?){13,19}\b")
+PHI_MRN = re.compile(
+    r"\b(?:MRN|Medical\s*Record(?:\s*Number)?|Patient\s*ID)\s*[:#]?\s*([A-Z0-9\-]{6,20})\b",
+    re.IGNORECASE,
+)
+PHI_MEMBER_ID = re.compile(
+    r"\b(?:Member|Policy|Insurance)\s*(?:ID|Number)\s*[:#]?\s*([A-Z0-9\-]{6,24})\b",
+    re.IGNORECASE,
+)
+PHI_NPI = re.compile(
+    r"\b(?:NPI|National\s*Provider\s*Identifier)\s*[:#]?\s*(\d{10})\b",
+    re.IGNORECASE,
+)
+PHI_DEA = re.compile(
+    r"\b(?:DEA|DEA\s*Number)\s*[:#]?\s*([A-Z]{2}\d{7})\b",
+    re.IGNORECASE,
+)
+PHI_DOB = re.compile(
+    r"\b(?:DOB|Date\s*of\s*Birth)\s*[:#]?\s*((?:0?[1-9]|1[0-2])[/-](?:0?[1-9]|[12][0-9]|3[01])[/-](?:19|20)?\d{2})\b",
+    re.IGNORECASE,
+)
+PCI_CVV = re.compile(
+    r"\b(?:cvv|cvc|cvn|security\s*code)\s*[:#]?\s*(\d{3,4})\b",
+    re.IGNORECASE,
+)
+PCI_EXPIRY = re.compile(
+    r"\b(?:exp(?:iry|iration)?|valid\s*thru)\s*[:#]?\s*((?:0[1-9]|1[0-2])[/-](?:\d{2}|\d{4}))\b",
+    re.IGNORECASE,
+)
 
 def luhn_ok(s: str) -> bool:
     """Luhn algorithm for credit card validation"""
@@ -42,7 +70,25 @@ def _mask_card(s: str) -> str:
         return "**** **** **** ****" if 13 <= len(raw) <= 19 and luhn_ok(raw) else m.group(0)
     return CARD.sub(repl, s)
 
-SENSITIVE_KEYS = {"email", "phone", "ssn", "card", "cvv", "secret", "token", "apikey", "api_key"}
+def _replace_regex(s: str, pattern: re.Pattern, placeholder: str) -> str:
+    return pattern.sub(lambda _: placeholder, s)
+
+SENSITIVE_KEYS = {
+    "email",
+    "phone",
+    "ssn",
+    "card",
+    "cvv",
+    "secret",
+    "token",
+    "apikey",
+    "api_key",
+    "mrn",
+    "npi",
+    "dea",
+    "member_id",
+    "dob",
+}
 
 # Global Presidio instances
 ANALYZER = None
@@ -88,6 +134,101 @@ def build_presidio():
         )
         registry.add_recognizer(ssn_recognizer)
 
+        # HIPAA PHI recognizers
+        registry.add_recognizer(
+            PatternRecognizer(
+                supported_entity="US_MEDICAL_RECORD_NUMBER",
+                patterns=[
+                    Pattern(
+                        name="US_MEDICAL_RECORD_NUMBER",
+                        regex=r"\b(?:MRN|Medical\s*Record(?:\s*Number)?|Patient\s*ID)\s*[:#]?\s*[A-Z0-9\-]{6,20}\b",
+                        score=0.82,
+                    )
+                ],
+                context=["mrn", "medical record", "patient id", "chart"],
+            )
+        )
+        registry.add_recognizer(
+            PatternRecognizer(
+                supported_entity="US_HEALTH_MEMBER_ID",
+                patterns=[
+                    Pattern(
+                        name="US_HEALTH_MEMBER_ID",
+                        regex=r"\b(?:Member|Policy|Insurance)\s*(?:ID|Number)\s*[:#]?\s*[A-Z0-9\-]{6,24}\b",
+                        score=0.8,
+                    )
+                ],
+                context=["member id", "policy", "insurance", "payer"],
+            )
+        )
+        registry.add_recognizer(
+            PatternRecognizer(
+                supported_entity="US_NPI",
+                patterns=[
+                    Pattern(
+                        name="US_NPI",
+                        regex=r"\b(?:NPI|National\s*Provider\s*Identifier)\s*[:#]?\s*\d{10}\b",
+                        score=0.85,
+                    )
+                ],
+                context=["npi", "provider", "national provider identifier"],
+            )
+        )
+        registry.add_recognizer(
+            PatternRecognizer(
+                supported_entity="US_DEA",
+                patterns=[
+                    Pattern(
+                        name="US_DEA",
+                        regex=r"\b(?:DEA|DEA\s*Number)\s*[:#]?\s*[A-Z]{2}\d{7}\b",
+                        score=0.85,
+                    )
+                ],
+                context=["dea", "prescriber", "controlled substance"],
+            )
+        )
+        registry.add_recognizer(
+            PatternRecognizer(
+                supported_entity="US_DATE_OF_BIRTH",
+                patterns=[
+                    Pattern(
+                        name="US_DATE_OF_BIRTH",
+                        regex=r"\b(?:DOB|Date\s*of\s*Birth)\s*[:#]?\s*(?:0?[1-9]|1[0-2])[/-](?:0?[1-9]|[12][0-9]|3[01])[/-](?:19|20)?\d{2}\b",
+                        score=0.78,
+                    )
+                ],
+                context=["dob", "date of birth", "patient"],
+            )
+        )
+
+        # PCI-DSS related recognizers
+        registry.add_recognizer(
+            PatternRecognizer(
+                supported_entity="PCI_CVV",
+                patterns=[
+                    Pattern(
+                        name="PCI_CVV",
+                        regex=r"\b(?:cvv|cvc|cvn|security\s*code)\s*[:#]?\s*\d{3,4}\b",
+                        score=0.88,
+                    )
+                ],
+                context=["cvv", "cvc", "security code", "payment"],
+            )
+        )
+        registry.add_recognizer(
+            PatternRecognizer(
+                supported_entity="PCI_EXPIRY",
+                patterns=[
+                    Pattern(
+                        name="PCI_EXPIRY",
+                        regex=r"\b(?:exp(?:iry|iration)?|valid\s*thru)\s*[:#]?\s*(?:0[1-9]|1[0-2])[/-](?:\d{2}|\d{4})\b",
+                        score=0.84,
+                    )
+                ],
+                context=["expiry", "expiration", "valid thru", "payment"],
+            )
+        )
+
         analyzer = AnalyzerEngine(registry=registry, nlp_engine=nlp_engine, supported_languages=["en"])
         anonymizer = AnonymizerEngine()
         return analyzer, anonymizer
@@ -114,6 +255,13 @@ ANONYMIZE_OPERATORS = {
     "IP_ADDRESS": OperatorConfig("mask", {"masking_char": "*", "chars_to_mask": 4, "from_end": True}),
     "IBAN_CODE": OperatorConfig("mask", {"masking_char": "*", "chars_to_mask": 4, "from_end": True}),
     "US_SSN": OperatorConfig("mask", {"masking_char": "*", "chars_to_mask": 4, "from_end": True}),
+    "US_MEDICAL_RECORD_NUMBER": OperatorConfig("replace", {"new_value": "<USER_MRN>"}),
+    "US_HEALTH_MEMBER_ID": OperatorConfig("replace", {"new_value": "<USER_MEMBER_ID>"}),
+    "US_NPI": OperatorConfig("replace", {"new_value": "<USER_NPI>"}),
+    "US_DEA": OperatorConfig("replace", {"new_value": "<USER_DEA>"}),
+    "US_DATE_OF_BIRTH": OperatorConfig("replace", {"new_value": "<USER_DOB>"}),
+    "PCI_CVV": OperatorConfig("replace", {"new_value": "<PCI_CVV>"}),
+    "PCI_EXPIRY": OperatorConfig("replace", {"new_value": "<PCI_EXPIRY>"}),
     "API_KEY": OperatorConfig("replace", {"new_value": "[REDACTED_API_KEY]"}),
     "JWT_TOKEN": OperatorConfig("replace", {"new_value": "[REDACTED_JWT]"}),
 }
@@ -125,6 +273,13 @@ def entity_type_to_placeholder(entity_type: str) -> str:
         "PHONE_NUMBER": "<USER_PHONE>",
         "CREDIT_CARD": "<USER_CARD>",
         "US_SSN": "<USER_SSN>",
+        "US_MEDICAL_RECORD_NUMBER": "<USER_MRN>",
+        "US_HEALTH_MEMBER_ID": "<USER_MEMBER_ID>",
+        "US_NPI": "<USER_NPI>",
+        "US_DEA": "<USER_DEA>",
+        "US_DATE_OF_BIRTH": "<USER_DOB>",
+        "PCI_CVV": "<PCI_CVV>",
+        "PCI_EXPIRY": "<PCI_EXPIRY>",
         "IP_ADDRESS": "<USER_IP>",
         "IBAN_CODE": "<USER_IBAN>",
         "API_KEY": "<API_KEY>",
@@ -182,8 +337,85 @@ def anonymize_text_regex(text: str) -> Tuple[str, List[str]]:
     if CARD.search(text):
         redacted = _mask_card(redacted)
         reasons.append("pii.redacted:card")
+
+    if PHI_MRN.search(text):
+        redacted = _replace_regex(redacted, PHI_MRN, "<USER_MRN>")
+        reasons.append("pii.redacted:us_medical_record_number")
+
+    if PHI_MEMBER_ID.search(text):
+        redacted = _replace_regex(redacted, PHI_MEMBER_ID, "<USER_MEMBER_ID>")
+        reasons.append("pii.redacted:us_health_member_id")
+
+    if PHI_NPI.search(text):
+        redacted = _replace_regex(redacted, PHI_NPI, "<USER_NPI>")
+        reasons.append("pii.redacted:us_npi")
+
+    if PHI_DEA.search(text):
+        redacted = _replace_regex(redacted, PHI_DEA, "<USER_DEA>")
+        reasons.append("pii.redacted:us_dea")
+
+    if PHI_DOB.search(text):
+        redacted = _replace_regex(redacted, PHI_DOB, "<USER_DOB>")
+        reasons.append("pii.redacted:us_date_of_birth")
+
+    if PCI_CVV.search(text):
+        redacted = _replace_regex(redacted, PCI_CVV, "<PCI_CVV>")
+        reasons.append("pii.redacted:pci_cvv")
+
+    if PCI_EXPIRY.search(text):
+        redacted = _replace_regex(redacted, PCI_EXPIRY, "<PCI_EXPIRY>")
+        reasons.append("pii.redacted:pci_expiry")
     
     return redacted, reasons
+
+def _has_overlap(start: int, end: int, findings: List[Dict[str, Any]]) -> bool:
+    for finding in findings:
+        if not (end <= finding["start"] or start >= finding["end"]):
+            return True
+    return False
+
+def _append_regex_findings(findings: List[Dict[str, Any]], pattern: re.Pattern, pii_type: str, text: str, score: float) -> None:
+    for match in pattern.finditer(text):
+        if _has_overlap(match.start(), match.end(), findings):
+            continue
+        findings.append({
+            "type": pii_type,
+            "start": match.start(),
+            "end": match.end(),
+            "score": score,
+            "text": match.group(),
+        })
+
+def detect_regex_pii_findings(raw_text: str) -> List[Dict[str, Any]]:
+    """Detect PII findings using regex patterns for fallback mode."""
+    findings: List[Dict[str, Any]] = []
+
+    _append_regex_findings(findings, EMAIL, "PII:email_address", raw_text, 0.8)
+    _append_regex_findings(findings, PHONE, "PII:phone_number", raw_text, 0.8)
+
+    for match in CARD.finditer(raw_text):
+        raw_card = re.sub(r"[^\d]", "", match.group())
+        if not (13 <= len(raw_card) <= 19 and luhn_ok(raw_card)):
+            continue
+        if _has_overlap(match.start(), match.end(), findings):
+            continue
+        findings.append({
+            "type": "PII:credit_card",
+            "start": match.start(),
+            "end": match.end(),
+            "score": 0.9,
+            "text": match.group(),
+        })
+
+    _append_regex_findings(findings, PHI_MRN, "PII:us_medical_record_number", raw_text, 0.82)
+    _append_regex_findings(findings, PHI_MEMBER_ID, "PII:us_health_member_id", raw_text, 0.8)
+    _append_regex_findings(findings, PHI_NPI, "PII:us_npi", raw_text, 0.85)
+    _append_regex_findings(findings, PHI_DEA, "PII:us_dea", raw_text, 0.85)
+    _append_regex_findings(findings, PHI_DOB, "PII:us_date_of_birth", raw_text, 0.78)
+    _append_regex_findings(findings, PCI_CVV, "PII:pci_cvv", raw_text, 0.88)
+    _append_regex_findings(findings, PCI_EXPIRY, "PII:pci_expiry", raw_text, 0.84)
+
+    return findings
 
 def is_password_field(field_name: str) -> bool:
     """Check if field name indicates a password field"""
@@ -717,6 +949,8 @@ def _apply_tool_specific_policy_dynamic(tool: str, raw_text: str, now: int, tool
                     "score": r.score,
                     "text": raw_text[r.start:r.end]
                 })
+    else:
+        findings.extend(detect_regex_pii_findings(raw_text))
     
 
     import re
@@ -960,36 +1194,8 @@ def _apply_strict_fallback(raw_text: str, now: int, user_id: Optional[str] = Non
                     "text": raw_text[r.start:r.end]
                 })
     else:
-        # Fallback regex detection for email, phone, card
-        if EMAIL.search(raw_text):
-            for match in EMAIL.finditer(raw_text):
-                all_findings.append({
-                    "type": "PII:email_address",
-                    "start": match.start(),
-                    "end": match.end(),
-                    "score": 0.8,
-                    "text": match.group()
-                })
-        if PHONE.search(raw_text):
-            for match in PHONE.finditer(raw_text):
-                all_findings.append({
-                    "type": "PII:phone_number",
-                    "start": match.start(),
-                    "end": match.end(),
-                    "score": 0.8,
-                    "text": match.group()
-                })
-        if CARD.search(raw_text):
-            for match in CARD.finditer(raw_text):
-                raw_card = re.sub(r"[^\d]", "", match.group())
-                if 13 <= len(raw_card) <= 19 and luhn_ok(raw_card):
-                    all_findings.append({
-                        "type": "PII:credit_card",
-                        "start": match.start(),
-                        "end": match.end(),
-                        "score": 0.9,
-                        "text": match.group()
-                    })
+        # Fallback regex detection for standard, HIPAA PHI, and PCI-DSS entities
+        all_findings.extend(detect_regex_pii_findings(raw_text))
     
     # Additionally detect passwords (not in Presidio) and payment amounts
     password_findings = []

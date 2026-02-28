@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "governsai-precheck"
-version = "0.0.1"
+version = "0.1.0"
 description = "Policy evaluation and PII redaction service for GovernsAI"
 authors = [{name = "GovernsAI", email = "team@governs.ai"}]
 readme = "README.md"

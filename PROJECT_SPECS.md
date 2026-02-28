@@ -154,7 +154,7 @@ GET /api/v1/health
 {
   "ok": true,
   "service": "governsai-precheck",
-  "version": "0.0.1"
+  "version": "0.1.0"
 }
 ```
 
@@ -170,7 +170,7 @@ GET /api/v1/ready
 {
   "ready": true,
   "service": "governsai-precheck",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "checks": {
     "presidio": {"status": "ok", "message": "..."},
     "policy": {"status": "ok", "message": "..."},
@@ -284,7 +284,7 @@ GET /api/v1/health
 {
   "ok": true,
   "service": "governsai-precheck",
-  "version": "0.0.1"
+  "version": "0.1.0"
 }
 ```
 
@@ -300,7 +300,7 @@ GET /api/v1/ready
 {
   "ready": true,
   "service": "governsai-precheck",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "checks": {
     "presidio": {
       "status": "ok",
