@@ -19,6 +19,7 @@ import asyncio
 import hashlib
 import json
 import secrets
+import os
 from datetime import datetime
 from typing import List, Tuple, Optional
 
@@ -207,8 +208,8 @@ async def metrics():
     # Set service info if not already set
     set_service_info(
         version="0.0.1",
-        build_date="2024-01-XX",
-        git_commit="unknown"
+        build_date=os.getenv("BUILD_DATE", "unknown"),
+        git_commit=os.getenv("GIT_COMMIT", "unknown")
     )
     
     metrics_data = get_metrics()
