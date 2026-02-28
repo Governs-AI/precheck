@@ -43,6 +43,7 @@ dependencies = [
 dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
     "httpx>=0.25.0",
     "black>=23.0.0",
     "isort>=5.12.0",
@@ -103,5 +104,23 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short --cov=app --cov-report=term-missing --cov-fail-under=80"
 asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["app"]
+omit = [
+    "app/migrations/*",
+    "app/__pycache__/*",
+]
+
+[tool.coverage.report]
+# Enforce 80% coverage on the critical policy engine path
+fail_under = 80
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "pass$",
+]
