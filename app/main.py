@@ -39,7 +39,7 @@ def create_app() -> FastAPI:
     _configure_logging()
     app = FastAPI(
         title="GovernsAI Precheck",
-        version="0.0.1",
+        version="0.1.0",
         description="Policy evaluation and PII redaction service for GovernsAI",
         lifespan=lifespan
     )
