@@ -132,12 +132,13 @@ class TestEmitEventSuccess:
         mock_send = AsyncMock()
         monkeypatch.setattr(ev_module, "_send_via_websocket", mock_send)
 
-        event = {"type": "decision", "decision": "allow"}
+        event = {"type": "decision", "decision": "allow", "data": {"correlationId": "corr-123"}}
         await ev_module.emit_event(event)
 
         mock_send.assert_called_once()
         call_url = mock_send.call_args[0][0]
         assert call_url == "ws://localhost:3003?org=org1&key=GAI_key"
+        assert mock_send.call_args[0][3] == "corr-123"
 
     @pytest.mark.asyncio
     async def test_event_sent_as_json_string(self, monkeypatch):
@@ -150,7 +151,7 @@ class TestEmitEventSuccess:
 
         captured = {}
 
-        async def fake_send(url, message, api_key):
+        async def fake_send(url, message, api_key, correlation_id):
             captured["message"] = message
 
         monkeypatch.setattr(ev_module, "_send_via_websocket", fake_send)
@@ -181,7 +182,7 @@ class TestEmitEventRetryExhaustion:
         dlq_path = str(tmp_path / "retry.dlq.jsonl")
         monkeypatch.setattr(ev_module.settings, "precheck_dlq", dlq_path)
 
-        async def always_fail(url, message, api_key):
+        async def always_fail(url, message, api_key, correlation_id):
             raise ConnectionRefusedError("no server")
 
         monkeypatch.setattr(ev_module, "_send_via_websocket", always_fail)
@@ -205,7 +206,7 @@ class TestEmitEventRetryExhaustion:
 
         call_count = {"n": 0}
 
-        async def fail_n_times(url, message, api_key):
+        async def fail_n_times(url, message, api_key, correlation_id):
             call_count["n"] += 1
             raise ConnectionError("fail")
 
