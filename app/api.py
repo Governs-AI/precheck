@@ -8,7 +8,7 @@ from .log import audit_log
 from .metrics import (
     get_metrics, get_metrics_content_type, set_service_info,
     record_precheck_request, record_postcheck_request, record_policy_evaluation,
-    set_active_requests
+    record_request_error, set_active_requests
 )
 from .settings import settings
 from .auth import require_api_key
@@ -25,6 +25,12 @@ from typing import List, Tuple, Optional
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _ensure_correlation_id(corr_id: Optional[str]) -> str:
+    """Return an existing correlation ID or generate a new one."""
+    return corr_id or f"corr-{secrets.token_hex(12)}"
+
 
 def extract_pii_info_from_reasons(reasons: Optional[List[str]]) -> Tuple[List[str], float]:
     """Extract PII types and calculate confidence from reason codes"""
@@ -219,6 +225,7 @@ async def precheck(
     """Precheck endpoint for policy evaluation and PII redaction"""
     # User ID is optional - websocket will resolve from API key if needed
     user_id = req.user_id
+    correlation_id = _ensure_correlation_id(req.corr_id)
 
     # Rate limiting (100 requests per minute per user/api_key)
     if user_id:
@@ -235,7 +242,7 @@ async def precheck(
     start_ts = int(start_time)
     
     try:
-        logger.debug("precheck request", extra={"tool": req.tool, "corr_id": req.corr_id})
+        logger.debug("precheck request", extra={"tool": req.tool, "corr_id": correlation_id})
 
         # Use new policy evaluation with payload policies
         policy_config = req.policy_config.model_dump() if req.policy_config else None
@@ -281,7 +288,7 @@ async def precheck(
             "type": "INGEST",
             "channel": webhook_channel,
             "schema": "decision.v1",
-            "idempotencyKey": f"precheck-{start_ts}-{req.corr_id or 'unknown'}",
+            "idempotencyKey": f"precheck-{start_ts}-{correlation_id}",
             "data": {
                 "orgId": webhook_org_id,
                 "direction": "precheck",
@@ -298,7 +305,7 @@ async def precheck(
                 },
                 "payloadHash": f"sha256:{hashlib.sha256(req.raw_text.encode()).hexdigest()}",
                 "latencyMs": int((time.time() - start_time) * 1000),
-                "correlationId": req.corr_id,
+                "correlationId": correlation_id,
                 "tags": [],  # TODO: Extract from request or make configurable
                 "ts": f"{datetime.fromtimestamp(start_ts).isoformat()}Z",
                 "authentication": {
@@ -310,17 +317,17 @@ async def precheck(
         
         # Fire and forget (don't block response path)
         try:
-            asyncio.create_task(emit_event(event))
+            asyncio.create_task(emit_event(event, correlation_id=correlation_id))
         except RuntimeError:
             # If no running loop (tests), do it inline once
-            await emit_event(event)
+            await emit_event(event, correlation_id=correlation_id)
         
         # Audit log before response
         audit_log("precheck", 
                   user_id=user_id, 
                   tool=req.tool, 
                   decision=result["decision"], 
-                  corr_id=req.corr_id,
+                  corr_id=correlation_id,
                   policy_id=result.get("policy_id"),
                   reasons=result.get("reasons", []))
         
@@ -337,6 +344,7 @@ async def precheck(
         return DecisionResponse(**result)
     
     except Exception as e:
+        record_request_error("precheck", type(e).__name__)
         # Re-raise the exception after clearing metrics
         raise e
     
@@ -352,6 +360,7 @@ async def postcheck(
     """Postcheck endpoint for post-execution validation"""
     # User ID is optional - websocket will resolve from API key if needed
     user_id = req.user_id
+    correlation_id = _ensure_correlation_id(req.corr_id)
 
     # Rate limiting (100 requests per minute per user/api_key)
     if user_id:
@@ -368,7 +377,7 @@ async def postcheck(
     start_ts = int(start_time)
     
     try:
-        logger.debug("postcheck request", extra={"tool": req.tool, "corr_id": req.corr_id})
+        logger.debug("postcheck request", extra={"tool": req.tool, "corr_id": correlation_id})
 
         # Use new policy evaluation with payload policies
         policy_config = req.policy_config.model_dump() if req.policy_config else None
@@ -414,7 +423,7 @@ async def postcheck(
             "type": "INGEST",
             "channel": webhook_channel,
             "schema": "decision.v1",
-            "idempotencyKey": f"postcheck-{start_ts}-{req.corr_id or 'unknown'}",
+            "idempotencyKey": f"postcheck-{start_ts}-{correlation_id}",
             "data": {
                 "orgId": webhook_org_id,
                 "direction": "postcheck",
@@ -431,7 +440,7 @@ async def postcheck(
                 },
                 "payloadHash": f"sha256:{hashlib.sha256(req.raw_text.encode()).hexdigest()}",
                 "latencyMs": int((time.time() - start_time) * 1000),
-                "correlationId": req.corr_id,
+                "correlationId": correlation_id,
                 "tags": [],  # TODO: Extract from request or make configurable
                 "ts": f"{datetime.fromtimestamp(start_ts).isoformat()}Z",
                 "authentication": {
@@ -443,17 +452,17 @@ async def postcheck(
         
         # Fire and forget (don't block response path)
         try:
-            asyncio.create_task(emit_event(event))
+            asyncio.create_task(emit_event(event, correlation_id=correlation_id))
         except RuntimeError:
             # If no running loop (tests), do it inline once
-            await emit_event(event)
+            await emit_event(event, correlation_id=correlation_id)
         
         # Audit log before response
         audit_log("postcheck", 
                   user_id=user_id, 
                   tool=req.tool, 
                   decision=result["decision"], 
-                  corr_id=req.corr_id,
+                  corr_id=correlation_id,
                   policy_id=result.get("policy_id"),
                   reasons=result.get("reasons", []))
         
@@ -470,6 +479,7 @@ async def postcheck(
         return DecisionResponse(**result)
     
     except Exception as e:
+        record_request_error("postcheck", type(e).__name__)
         # Re-raise the exception after clearing metrics
         raise e
     

@@ -43,6 +43,18 @@ dlq_events_total = Counter(
     ['error_type']
 )
 
+auth_failures_total = Counter(
+    'auth_failures_total',
+    'Total number of authentication failures',
+    ['reason']
+)
+
+request_errors_total = Counter(
+    'request_errors_total',
+    'Total number of request processing errors',
+    ['endpoint', 'error_type']
+)
+
 # Histogram metrics
 precheck_duration_seconds = Histogram(
     'precheck_duration_seconds',
@@ -168,6 +180,19 @@ def record_webhook_event(event_type: str, status: str, duration: float):
 def record_dlq_event(error_type: str):
     """Record a DLQ event metric"""
     dlq_events_total.labels(
+        error_type=error_type
+    ).inc()
+
+def record_auth_failure(reason: str):
+    """Record an authentication failure."""
+    auth_failures_total.labels(
+        reason=reason
+    ).inc()
+
+def record_request_error(endpoint: str, error_type: str):
+    """Record request processing errors by endpoint."""
+    request_errors_total.labels(
+        endpoint=endpoint,
         error_type=error_type
     ).inc()
 
