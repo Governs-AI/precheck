@@ -1,4 +1,4 @@
-.PHONY: install install-dev test format lint type-check clean run docker-build docker-run
+.PHONY: install install-dev test test-api format lint type-check clean run docker-build docker-run
 
 # Install production dependencies
 install:
@@ -13,6 +13,10 @@ install-dev:
 # Run tests
 test:
 	pytest tests/ -v
+
+# Run API route tests only (QA.1 scaffold)
+test-api:
+	pytest tests/api/ -v
 
 # Format code
 format:

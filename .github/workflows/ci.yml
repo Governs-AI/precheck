@@ -64,6 +64,9 @@ jobs:
       - name: Install pytest-cov
         run: pip install pytest-cov
 
+      - name: pytest — API route suite (QA.1)
+        run: pytest tests/api/ -v --tb=short --no-cov
+
       - name: pytest with coverage (≥80% required)
         run: pytest tests/ -v --tb=short --cov=app --cov-report=term-missing --cov-fail-under=80
 
