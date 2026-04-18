@@ -78,3 +78,73 @@ jobs:
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  load:
+    name: Load (k6 — QA.3)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install precheck with dev extras
+        run: pip install -e ".[dev]"
+
+      - name: Seed load-test API key
+        run: |
+          python - <<'PY'
+          import os
+          os.environ.setdefault("DATABASE_URL", "sqlite:///./load.db")
+          os.environ.setdefault("DEBUG", "true")
+          os.environ.setdefault("PII_TOKEN_SALT", "ci-load-salt")
+          os.environ.setdefault("WEBHOOK_SECRET", "ci-load-webhook-secret")
+          os.environ.setdefault("REDIS_URL", "")
+          from app.storage import Base, APIKey, engine, SessionLocal
+          Base.metadata.create_all(bind=engine)
+          db = SessionLocal()
+          db.merge(APIKey(key="GAI_ci_load_key", user_id="load-bot", is_active=True))
+          db.commit()
+          db.close()
+          PY
+
+      - name: Start precheck
+        env:
+          DATABASE_URL: sqlite:///./load.db
+          DEBUG: "true"
+          PII_TOKEN_SALT: ci-load-salt
+          WEBHOOK_SECRET: ci-load-webhook-secret
+          REDIS_URL: ""
+          USE_PRESIDIO: "false"
+          APP_BIND: "0.0.0.0:8082"
+        run: |
+          nohup python start.py >precheck.log 2>&1 &
+          for i in {1..30}; do
+            curl -fsS http://localhost:8082/api/v1/health && break
+            sleep 1
+          done
+
+      - uses: grafana/setup-k6-action@v1
+
+      - name: Run k6 load (100rps · 30s · p95<200ms)
+        env:
+          PRECHECK_URL: http://localhost:8082
+          GOVERNS_KEY: GAI_ci_load_key
+        run: |
+          k6 run \
+            --summary-export=precheck_load.json \
+            tests/load/precheck_load.js
+
+      - name: Upload k6 artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-precheck-load
+          path: |
+            precheck_load.json
+            summary.html
+            precheck.log
+          if-no-files-found: warn
