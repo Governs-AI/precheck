@@ -17,11 +17,14 @@ class User(Base):
 class APIKey(Base):
     __tablename__ = "api_keys"
 
-    key = Column(String, primary_key=True)
+    # key_hash is the HMAC-SHA256 of the raw key — the plaintext key is never
+    # stored after creation. key_prefix stores first 8 chars for display only.
+    key_hash = Column(String, primary_key=True)
+    key_prefix = Column(String, nullable=False)  # e.g. "GAI_ab12" — safe to display
     user_id = Column(String, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     is_active = Column(Boolean, default=True)
-    expires_at = Column(DateTime, nullable=True)  # None means the key never expires
+    expires_at = Column(DateTime, nullable=True)
 
 class Policy(Base):
     __tablename__ = "policies"
