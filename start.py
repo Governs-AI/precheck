@@ -7,6 +7,9 @@ import os
 from app.settings import settings
 
 if __name__ == "__main__":
+    # Ensure CWD is the repo root so relative paths (policy files, etc.) resolve correctly
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
     # Parse host and port from APP_BIND
     host, port = settings.app_bind.split(":")
     port = int(port)
