@@ -30,8 +30,9 @@ RUN python -c "from presidio_analyzer import AnalyzerEngine; \
     anonymizer = AnonymizerEngine(); \
     print('✅ Presidio Anonymizer initialized')"
 
-# Copy application code
+# Copy application code and policy file
 COPY app ./app
+COPY policy.tool_access.yaml ./
 
 # Create non-root user
 RUN useradd --create-home --shell /bin/bash app && \
