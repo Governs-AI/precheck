@@ -30,7 +30,13 @@ class Settings(BaseSettings):
     api_key_header: str = "X-Governs-Key"
 
     # Webhook configuration
-    webhook_url: Optional[str] = None
+    # Base URL of the dashboard websocket gateway (e.g. wss://host/ws/gateway).
+    # Per-request connection URLs are built by appending ?org=...&key=...&channels=org:<id>:decisions
+    # in app.events. Single-tenant WEBHOOK_URL is gone — see GOV-13.
+    webhook_base_url: Optional[str] = None
+    # Connection-level API key the dashboard uses to authenticate the precheck
+    # service itself when opening the websocket (separate from per-request keys).
+    webhook_conn_key: Optional[str] = None
     webhook_secret: str = _DEFAULT_WEBHOOK_SECRET
     precheck_dlq: str = "/tmp/precheck.dlq.jsonl"
     webhook_timeout_s: float = 2.5
