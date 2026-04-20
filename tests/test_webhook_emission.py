@@ -12,13 +12,13 @@ Covers:
   - _write_dlq() appends JSON lines to the target file
 """
 
-import json
-import tempfile
-import pathlib
-import pytest
 import asyncio
-from unittest.mock import AsyncMock, patch, MagicMock
+import json
+import pathlib
+import tempfile
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 
 # ---------------------------------------------------------------------------
 # _parse_webhook_url
@@ -28,6 +28,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 class TestParseWebhookUrl:
     def _parse(self, url):
         from app.events import _parse_webhook_url
+
         return _parse_webhook_url(url)
 
     def test_extracts_org_id(self):
@@ -65,6 +66,7 @@ class TestParseWebhookUrl:
 class TestWriteDlq:
     def test_creates_file_on_first_write(self, tmp_path):
         from app.events import _write_dlq
+
         dlq = str(tmp_path / "sub" / "test.dlq.jsonl")
         event = {"type": "decision", "tool": "model.chat"}
         _write_dlq(event, "test_error", dlq_path=dlq)
@@ -72,6 +74,7 @@ class TestWriteDlq:
 
     def test_appends_valid_json_line(self, tmp_path):
         from app.events import _write_dlq
+
         dlq = str(tmp_path / "test.dlq.jsonl")
         event = {"type": "decision", "tool": "model.chat"}
         _write_dlq(event, "network_failure", dlq_path=dlq)
@@ -83,6 +86,7 @@ class TestWriteDlq:
 
     def test_multiple_events_append(self, tmp_path):
         from app.events import _write_dlq
+
         dlq = str(tmp_path / "test.dlq.jsonl")
         _write_dlq({"id": 1}, "err1", dlq_path=dlq)
         _write_dlq({"id": 2}, "err2", dlq_path=dlq)
@@ -132,7 +136,11 @@ class TestEmitEventSuccess:
         mock_send = AsyncMock()
         monkeypatch.setattr(ev_module, "_send_via_websocket", mock_send)
 
-        event = {"type": "decision", "decision": "allow", "data": {"correlationId": "corr-123"}}
+        event = {
+            "type": "decision",
+            "decision": "allow",
+            "data": {"correlationId": "corr-123"},
+        }
         await ev_module.emit_event(event)
 
         mock_send.assert_called_once()
@@ -202,7 +210,9 @@ class TestEmitEventRetryExhaustion:
         )
         monkeypatch.setattr(ev_module.settings, "webhook_max_retries", 3)
         monkeypatch.setattr(ev_module.settings, "webhook_backoff_base_ms", 1)
-        monkeypatch.setattr(ev_module.settings, "precheck_dlq", str(tmp_path / "r.jsonl"))
+        monkeypatch.setattr(
+            ev_module.settings, "precheck_dlq", str(tmp_path / "r.jsonl")
+        )
 
         call_count = {"n": 0}
 

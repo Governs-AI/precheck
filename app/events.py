@@ -1,18 +1,22 @@
-import json
-import time
-import pathlib
 import asyncio
+import json
 import logging
-import websockets
-from urllib.parse import urlparse, parse_qs
+import pathlib
+import time
 from typing import Any, Dict, Optional, Tuple
+from urllib.parse import parse_qs, urlparse
+
+import websockets
+
+from .metrics import record_dlq_event, record_webhook_event, set_dlq_size
 from .settings import settings
-from .metrics import record_webhook_event, record_dlq_event, set_dlq_size
 
 logger = logging.getLogger(__name__)
 
 
-def _parse_webhook_url(webhook_url: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+def _parse_webhook_url(
+    webhook_url: str,
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """Parse webhook URL to extract org ID, decisions channel, and API key"""
     if not webhook_url:
         return None, None, None
@@ -21,15 +25,15 @@ def _parse_webhook_url(webhook_url: str) -> Tuple[Optional[str], Optional[str], 
         parsed = urlparse(webhook_url)
         query_params = parse_qs(parsed.query)
 
-        org_id = query_params.get('org', [None])[0]
-        api_key = query_params.get('key', [None])[0]
-        channels = query_params.get('channels', [None])[0]
+        org_id = query_params.get("org", [None])[0]
+        api_key = query_params.get("key", [None])[0]
+        channels = query_params.get("channels", [None])[0]
         decisions_channel = None
 
         if channels:
-            channel_list = [ch.strip() for ch in channels.split(',')]
+            channel_list = [ch.strip() for ch in channels.split(",")]
             for channel in channel_list:
-                if channel.endswith(':decisions'):
+                if channel.endswith(":decisions"):
                     decisions_channel = channel
                     break
 
@@ -77,7 +81,7 @@ def _set_dlq_size(path: str) -> None:
         logger.warning("Failed to set DLQ size: %s", type(e).__name__)
 
 
-async def _sleep_ms(ms: int):
+async def _sleep_ms(ms: int) -> None:
     """Sleep for specified milliseconds"""
     await asyncio.sleep(ms / 1000.0)
 
@@ -108,7 +112,9 @@ async def _send_via_websocket(
         await websocket.send(message)
 
 
-async def emit_event(event: Dict[str, Any], correlation_id: Optional[str] = None) -> None:
+async def emit_event(
+    event: Dict[str, Any], correlation_id: Optional[str] = None
+) -> None:
     """Sends the event via WebSocket to WEBHOOK_URL.
     Authenticates the connection before sending, so the raw API key never
     travels inside the INGEST payload.
@@ -144,21 +150,28 @@ async def emit_event(event: Dict[str, Any], correlation_id: Optional[str] = None
             err = f"websocket_exception:{type(e).__name__}:{str(e)[:200]}"
             logger.warning(
                 "websocket emit attempt %d/%d failed: %s",
-                attempt, settings.webhook_max_retries, type(e).__name__,
+                attempt,
+                settings.webhook_max_retries,
+                type(e).__name__,
             )
 
             if "SSL" in str(e) and websocket_url.startswith("wss://"):
                 try:
                     fallback_url = websocket_url.replace("wss://", "ws://", 1)
-                    await _send_via_websocket(fallback_url, message, conn_api_key, correlation)
+                    await _send_via_websocket(
+                        fallback_url, message, conn_api_key, correlation
+                    )
                     logger.debug("event emitted via ssl fallback attempt=%d", attempt)
-                    record_webhook_event(event_type, "success", time.time() - emit_started_at)
+                    record_webhook_event(
+                        event_type, "success", time.time() - emit_started_at
+                    )
                     return
                 except Exception as fallback_e:
                     err = f"websocket_fallback_exception:{type(fallback_e).__name__}:{str(fallback_e)[:200]}"
                     logger.warning(
                         "websocket ssl fallback attempt %d failed: %s",
-                        attempt, type(fallback_e).__name__,
+                        attempt,
+                        type(fallback_e).__name__,
                     )
 
         if attempt == settings.webhook_max_retries:
