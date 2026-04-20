@@ -1,10 +1,12 @@
-from fastapi import Header, HTTPException, Depends
-from sqlalchemy.orm import Session
 from datetime import datetime
 from typing import Optional
-from .storage import get_db, APIKey
-from .metrics import record_auth_failure
+
+from fastapi import Depends, Header, HTTPException
+from sqlalchemy.orm import Session
+
 from .key_utils import hash_api_key
+from .metrics import record_auth_failure
+from .storage import APIKey, get_db
 
 
 async def require_api_key(

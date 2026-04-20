@@ -1,8 +1,9 @@
 import logging
-import time
 import threading
+import time
 from collections import deque
 from typing import Deque, Dict, Optional
+
 from .settings import settings
 
 logger = logging.getLogger(__name__)
@@ -35,7 +36,7 @@ class RateLimiter:
                 self.redis_client = None
         elif redis_url and redis is None:
             logger.warning("redis package not installed; using in-memory rate limiter")
-    
+
     def is_allowed(self, key: str, limit: int, window: int) -> bool:
         """
         Check if request is allowed using a sliding window counter.
