@@ -1,60 +1,122 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2024 GovernsAI. All rights reserved.
 """
-TEST-3.5 — Webhook emission tests.
+TEST-3.5 — Webhook emission tests (DL-3 multi-tenant).
 
 Covers:
-  - emit_event() calls _send_via_websocket with correct args
-  - DLQ written when webhook_url is not configured
-  - DLQ written after all retries are exhausted
+  - build_webhook_url() composes per-org URLs from base + org_id + conn_key
+  - emit_event() requires both webhook_base_url AND org_id (DLQs otherwise)
+  - emit_event() routes to org-specific decisions channel
+  - No org_id cross-contamination between back-to-back emits
+  - DLQ written when retries exhausted
   - Event payload contains apiKeyId (hash), NOT the raw apiKey
-  - _parse_webhook_url() correctly extracts org_id, channel, api_key
-  - _write_dlq() appends JSON lines to the target file
 """
 
 import json
-import tempfile
 import pathlib
 import pytest
-import asyncio
-from unittest.mock import AsyncMock, patch, MagicMock
+from urllib.parse import urlsplit, parse_qs
+from unittest.mock import AsyncMock
 
 
 # ---------------------------------------------------------------------------
-# _parse_webhook_url
+# build_webhook_url — pure URL construction
 # ---------------------------------------------------------------------------
 
 
-class TestParseWebhookUrl:
-    def _parse(self, url):
-        from app.events import _parse_webhook_url
-        return _parse_webhook_url(url)
+class TestBuildWebhookUrl:
+    @pytest.mark.parametrize(
+        "base,org,conn_key,expected_org,expected_channel,expected_key",
+        [
+            (
+                "wss://gw.example.com/ws/gateway",
+                "org-acme",
+                "GAI_conn",
+                "org-acme",
+                "org:org-acme:decisions",
+                "GAI_conn",
+            ),
+            (
+                "wss://gw.example.com/ws/gateway",
+                "org-globex",
+                "GAI_conn",
+                "org-globex",
+                "org:org-globex:decisions",
+                "GAI_conn",
+            ),
+            (
+                "ws://localhost:3003/ws/gateway",
+                "tenant_42",
+                None,
+                "tenant_42",
+                "org:tenant_42:decisions",
+                None,
+            ),
+            (
+                "wss://gw.example.com/ws/gateway",
+                "org with spaces & sym",
+                "k!ey",
+                "org with spaces & sym",
+                "org:org with spaces & sym:decisions",
+                "k!ey",
+            ),
+        ],
+    )
+    def test_url_construction(self, base, org, conn_key, expected_org, expected_channel, expected_key):
+        from app.events import build_webhook_url
 
-    def test_extracts_org_id(self):
-        org, _, _ = self._parse("ws://localhost:3003?org=my-org&key=tok123")
-        assert org == "my-org"
+        url = build_webhook_url(base, org, conn_key)
+        parts = urlsplit(url)
+        qs = parse_qs(parts.query)
 
-    def test_extracts_api_key(self):
-        _, _, key = self._parse("ws://localhost:3003?org=org1&key=GAI_abc123")
-        assert key == "GAI_abc123"
+        assert qs["org"] == [expected_org]
+        assert qs["channels"] == [expected_channel]
+        if expected_key is None:
+            assert "key" not in qs
+        else:
+            assert qs["key"] == [expected_key]
 
-    def test_extracts_decisions_channel(self):
-        url = "ws://localhost:3003?org=org1&key=k&channels=org1:decisions,org1:usage"
-        _, channel, _ = self._parse(url)
-        assert channel == "org1:decisions"
+    def test_preserves_scheme_and_path(self):
+        from app.events import build_webhook_url
 
-    def test_no_decisions_channel_returns_none(self):
-        url = "ws://localhost:3003?org=org1&key=k&channels=org1:usage"
-        _, channel, _ = self._parse(url)
-        assert channel is None
+        url = build_webhook_url("wss://gw.example.com/ws/gateway", "org-1", "k")
+        parts = urlsplit(url)
+        assert parts.scheme == "wss"
+        assert parts.netloc == "gw.example.com"
+        assert parts.path == "/ws/gateway"
 
-    def test_empty_url_returns_none_triple(self):
-        assert self._parse("") == (None, None, None)
+    def test_preserves_unrelated_query_params(self):
+        from app.events import build_webhook_url
 
-    def test_url_without_query_returns_none_values(self):
-        org, channel, key = self._parse("ws://localhost:3003")
-        assert org is None
-        assert key is None
+        url = build_webhook_url("ws://gw/ws?env=prod&region=us-east", "org-1", "k")
+        qs = parse_qs(urlsplit(url).query)
+        assert qs["env"] == ["prod"]
+        assert qs["region"] == ["us-east"]
+        assert qs["org"] == ["org-1"]
+
+    def test_strips_existing_org_key_channels_to_prevent_carryover(self):
+        from app.events import build_webhook_url
+
+        # If a prior URL had stale routing params, they must not bleed through
+        # to a different org's connection.
+        stale = "ws://gw/ws?org=stale-org&key=stale-key&channels=org:stale-org:decisions"
+        url = build_webhook_url(stale, "fresh-org", "fresh-key")
+        qs = parse_qs(urlsplit(url).query)
+        assert qs["org"] == ["fresh-org"]
+        assert qs["key"] == ["fresh-key"]
+        assert qs["channels"] == ["org:fresh-org:decisions"]
+
+    def test_missing_base_url_raises(self):
+        from app.events import build_webhook_url
+
+        with pytest.raises(ValueError):
+            build_webhook_url("", "org-1", "k")
+
+    def test_missing_org_id_raises(self):
+        from app.events import build_webhook_url
+
+        with pytest.raises(ValueError):
+            build_webhook_url("ws://gw/ws", "", "k")
 
 
 # ---------------------------------------------------------------------------
@@ -91,62 +153,108 @@ class TestWriteDlq:
 
 
 # ---------------------------------------------------------------------------
-# emit_event — no webhook URL → DLQ
+# emit_event — guard rails: missing config or missing org_id → DLQ
 # ---------------------------------------------------------------------------
 
 
-class TestEmitEventNoDlq:
+class TestEmitEventGuards:
     @pytest.mark.asyncio
-    async def test_no_webhook_url_writes_dlq(self, tmp_path, monkeypatch):
+    async def test_no_base_url_writes_dlq(self, tmp_path, monkeypatch):
         from app import events as ev_module
 
-        monkeypatch.setattr(ev_module.settings, "webhook_url", "")
+        monkeypatch.setattr(ev_module.settings, "webhook_base_url", "")
         dlq_path = str(tmp_path / "no_url.dlq.jsonl")
         monkeypatch.setattr(ev_module.settings, "precheck_dlq", dlq_path)
 
-        event = {"type": "decision", "decision": "allow", "tool": "model.chat"}
-        await ev_module.emit_event(event)
+        await ev_module.emit_event({"type": "decision"}, org_id="org-1")
 
-        assert pathlib.Path(dlq_path).exists()
         record = json.loads(pathlib.Path(dlq_path).read_text().strip())
-        assert "webhook_url_not_configured" in record["err"]
+        assert "webhook_base_url_not_configured" in record["err"]
 
-
-# ---------------------------------------------------------------------------
-# emit_event — successful send
-# ---------------------------------------------------------------------------
-
-
-class TestEmitEventSuccess:
     @pytest.mark.asyncio
-    async def test_calls_send_via_websocket(self, monkeypatch):
+    async def test_missing_org_id_writes_dlq(self, tmp_path, monkeypatch):
         from app import events as ev_module
 
-        monkeypatch.setattr(
-            ev_module.settings,
-            "webhook_url",
-            "ws://localhost:3003?org=org1&key=GAI_key",
-        )
+        monkeypatch.setattr(ev_module.settings, "webhook_base_url", "ws://gw/ws")
+        dlq_path = str(tmp_path / "no_org.dlq.jsonl")
+        monkeypatch.setattr(ev_module.settings, "precheck_dlq", dlq_path)
+
+        await ev_module.emit_event({"type": "decision"}, org_id=None)
+
+        record = json.loads(pathlib.Path(dlq_path).read_text().strip())
+        assert "missing_org_id" in record["err"]
+
+
+# ---------------------------------------------------------------------------
+# emit_event — successful per-org routing
+# ---------------------------------------------------------------------------
+
+
+class TestEmitEventRouting:
+    @pytest.mark.asyncio
+    async def test_routes_to_org_specific_url(self, monkeypatch):
+        from app import events as ev_module
+
+        monkeypatch.setattr(ev_module.settings, "webhook_base_url", "wss://gw.example.com/ws/gateway")
+        monkeypatch.setattr(ev_module.settings, "webhook_conn_key", "GAI_conn_key")
         monkeypatch.setattr(ev_module.settings, "webhook_max_retries", 1)
 
         mock_send = AsyncMock()
         monkeypatch.setattr(ev_module, "_send_via_websocket", mock_send)
 
-        event = {"type": "decision", "decision": "allow", "data": {"correlationId": "corr-123"}}
-        await ev_module.emit_event(event)
+        await ev_module.emit_event({"type": "decision"}, org_id="org-acme", correlation_id="corr-1")
 
         mock_send.assert_called_once()
         call_url = mock_send.call_args[0][0]
-        assert call_url == "ws://localhost:3003?org=org1&key=GAI_key"
-        assert mock_send.call_args[0][3] == "corr-123"
+        qs = parse_qs(urlsplit(call_url).query)
+        assert qs["org"] == ["org-acme"]
+        assert qs["channels"] == ["org:org-acme:decisions"]
+        assert qs["key"] == ["GAI_conn_key"]
+        # Connection key passed positionally as 3rd arg
+        assert mock_send.call_args[0][2] == "GAI_conn_key"
+        # Correlation id passed positionally as 4th arg
+        assert mock_send.call_args[0][3] == "corr-1"
+
+    @pytest.mark.asyncio
+    async def test_back_to_back_emits_use_distinct_org_urls(self, monkeypatch):
+        """Regression guard: org_id from one request must not leak into the next.
+
+        With the old single-tenant WEBHOOK_URL, all events shared one org from
+        env. After DL-3 each call must build its own URL from its own org_id.
+        """
+        from app import events as ev_module
+
+        monkeypatch.setattr(ev_module.settings, "webhook_base_url", "ws://gw/ws")
+        monkeypatch.setattr(ev_module.settings, "webhook_conn_key", "k")
+        monkeypatch.setattr(ev_module.settings, "webhook_max_retries", 1)
+
+        urls = []
+
+        async def capture(url, message, api_key, correlation_id):
+            urls.append(url)
+
+        monkeypatch.setattr(ev_module, "_send_via_websocket", capture)
+
+        await ev_module.emit_event({"type": "decision"}, org_id="org-a")
+        await ev_module.emit_event({"type": "decision"}, org_id="org-b")
+        await ev_module.emit_event({"type": "decision"}, org_id="org-a")
+
+        orgs = [parse_qs(urlsplit(u).query)["org"][0] for u in urls]
+        channels = [parse_qs(urlsplit(u).query)["channels"][0] for u in urls]
+
+        assert orgs == ["org-a", "org-b", "org-a"]
+        assert channels == [
+            "org:org-a:decisions",
+            "org:org-b:decisions",
+            "org:org-a:decisions",
+        ]
 
     @pytest.mark.asyncio
     async def test_event_sent_as_json_string(self, monkeypatch):
         from app import events as ev_module
 
-        monkeypatch.setattr(
-            ev_module.settings, "webhook_url", "ws://localhost:3003?org=o&key=k"
-        )
+        monkeypatch.setattr(ev_module.settings, "webhook_base_url", "ws://gw/ws")
+        monkeypatch.setattr(ev_module.settings, "webhook_conn_key", "k")
         monkeypatch.setattr(ev_module.settings, "webhook_max_retries", 1)
 
         captured = {}
@@ -157,9 +265,8 @@ class TestEmitEventSuccess:
         monkeypatch.setattr(ev_module, "_send_via_websocket", fake_send)
 
         event = {"type": "decision", "apiKeyId": "abc123hash"}
-        await ev_module.emit_event(event)
+        await ev_module.emit_event(event, org_id="org-1")
 
-        assert "message" in captured
         parsed = json.loads(captured["message"])
         assert parsed["type"] == "decision"
 
@@ -174,9 +281,8 @@ class TestEmitEventRetryExhaustion:
     async def test_all_retries_fail_writes_dlq(self, tmp_path, monkeypatch):
         from app import events as ev_module
 
-        monkeypatch.setattr(
-            ev_module.settings, "webhook_url", "ws://localhost:3003?org=o&key=k"
-        )
+        monkeypatch.setattr(ev_module.settings, "webhook_base_url", "ws://gw/ws")
+        monkeypatch.setattr(ev_module.settings, "webhook_conn_key", "k")
         monkeypatch.setattr(ev_module.settings, "webhook_max_retries", 2)
         monkeypatch.setattr(ev_module.settings, "webhook_backoff_base_ms", 1)
         dlq_path = str(tmp_path / "retry.dlq.jsonl")
@@ -187,9 +293,8 @@ class TestEmitEventRetryExhaustion:
 
         monkeypatch.setattr(ev_module, "_send_via_websocket", always_fail)
 
-        await ev_module.emit_event({"type": "decision", "tool": "test"})
+        await ev_module.emit_event({"type": "decision", "tool": "test"}, org_id="org-1")
 
-        assert pathlib.Path(dlq_path).exists()
         record = json.loads(pathlib.Path(dlq_path).read_text().strip())
         assert "websocket_exception" in record["err"]
 
@@ -197,9 +302,8 @@ class TestEmitEventRetryExhaustion:
     async def test_retry_count_respected(self, tmp_path, monkeypatch):
         from app import events as ev_module
 
-        monkeypatch.setattr(
-            ev_module.settings, "webhook_url", "ws://localhost:3003?org=o&key=k"
-        )
+        monkeypatch.setattr(ev_module.settings, "webhook_base_url", "ws://gw/ws")
+        monkeypatch.setattr(ev_module.settings, "webhook_conn_key", "k")
         monkeypatch.setattr(ev_module.settings, "webhook_max_retries", 3)
         monkeypatch.setattr(ev_module.settings, "webhook_backoff_base_ms", 1)
         monkeypatch.setattr(ev_module.settings, "precheck_dlq", str(tmp_path / "r.jsonl"))
@@ -212,7 +316,7 @@ class TestEmitEventRetryExhaustion:
 
         monkeypatch.setattr(ev_module, "_send_via_websocket", fail_n_times)
 
-        await ev_module.emit_event({"type": "test"})
+        await ev_module.emit_event({"type": "test"}, org_id="org-1")
 
         assert call_count["n"] == 3
 
@@ -229,7 +333,6 @@ class TestEventShape:
     """
 
     def test_event_does_not_contain_api_key_field(self):
-        """Construct an event the same way api.py does and verify the shape."""
         import hashlib
 
         raw_api_key = "GAI_supersecretkey123456"
@@ -242,7 +345,6 @@ class TestEventShape:
             "apiKeyId": api_key_id,
         }
 
-        # Raw key must NOT be present
         event_json = json.dumps(event)
         assert raw_api_key not in event_json
 

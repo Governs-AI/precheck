@@ -15,7 +15,8 @@ os.environ.setdefault("DEBUG", "true")           # bypasses secret-validator
 os.environ.setdefault("PII_TOKEN_SALT", "test-salt-for-ci-only")
 os.environ.setdefault("WEBHOOK_SECRET", "test-webhook-secret-ci")
 os.environ.setdefault("REDIS_URL", "")           # disable Redis in rate-limiter
-os.environ.setdefault("WEBHOOK_URL", "")
+os.environ.setdefault("WEBHOOK_BASE_URL", "")
+os.environ.setdefault("WEBHOOK_CONN_KEY", "")
 
 import pytest
 from datetime import datetime, timedelta
