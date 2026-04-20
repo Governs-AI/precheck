@@ -3,8 +3,8 @@ import json
 import logging
 import pathlib
 import time
-from typing import Any, Dict, Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from typing import Any, Dict, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import websockets
 
@@ -14,41 +14,39 @@ from .settings import settings
 logger = logging.getLogger(__name__)
 
 
-def _parse_webhook_url(
-    webhook_url: str,
-) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """Parse webhook URL to extract org ID, decisions channel, and API key"""
-    if not webhook_url:
-        return None, None, None
+def build_webhook_url(
+    base_url: str,
+    org_id: str,
+    conn_key: Optional[str] = None,
+) -> str:
+    """Build a per-org websocket URL by appending org/key/channels query params
+    to the configured base URL.
 
-    try:
-        parsed = urlparse(webhook_url)
-        query_params = parse_qs(parsed.query)
+    The dashboard websocket gateway expects:
+      - org: tenant identifier — drives channel routing on the receiving side
+      - key: connection-level API key the dashboard uses to authenticate the
+        precheck service (NOT a per-request user key)
+      - channels: comma-separated subscription list; we always include
+        org:<id>:decisions so the dashboard delivers this org's decisions
+    """
+    if not base_url:
+        raise ValueError("base_url is required")
+    if not org_id:
+        raise ValueError("org_id is required")
 
-        org_id = query_params.get("org", [None])[0]
-        api_key = query_params.get("key", [None])[0]
-        channels = query_params.get("channels", [None])[0]
-        decisions_channel = None
+    parts = urlsplit(base_url)
+    existing = [
+        (k, v)
+        for (k, v) in parse_qsl(parts.query, keep_blank_values=True)
+        if k not in ("org", "key", "channels")
+    ]
+    new_params = [("org", org_id)]
+    if conn_key:
+        new_params.append(("key", conn_key))
+    new_params.append(("channels", f"org:{org_id}:decisions"))
 
-        if channels:
-            channel_list = [ch.strip() for ch in channels.split(",")]
-            for channel in channel_list:
-                if channel.endswith(":decisions"):
-                    decisions_channel = channel
-                    break
-
-        return org_id, decisions_channel, api_key
-    except Exception as e:
-        logger.warning("Failed to parse webhook URL: %s", type(e).__name__)
-        return None, None, None
-
-
-def get_webhook_config() -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """Get organization ID, webhook channel, and API key from webhook URL"""
-    webhook_url = settings.webhook_base_url
-    if not webhook_url:
-        return None, None, None
-    return _parse_webhook_url(webhook_url)
+    query = urlencode(existing + new_params)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
 
 
 def _write_dlq(event: Dict[str, Any], err: str, dlq_path: Optional[str] = None) -> None:
@@ -113,13 +111,23 @@ async def _send_via_websocket(
 
 
 async def emit_event(
-    event: Dict[str, Any], correlation_id: Optional[str] = None
+    event: Dict[str, Any],
+    org_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
 ) -> None:
-    """Sends the event via WebSocket to WEBHOOK_URL.
-    Authenticates the connection before sending, so the raw API key never
-    travels inside the INGEST payload.
-    Falls back to DLQ (jsonl) after retries."""
-    webhook_url = settings.webhook_base_url
+    """Send the event over WebSocket to the org-specific gateway URL.
+
+    The connection URL is built from settings.webhook_base_url plus the caller-
+    supplied org_id; the connection key (if any) comes from settings, NOT from
+    the event or request, so per-request user keys never travel as URL params.
+
+    Falls back to DLQ (jsonl) when:
+      - webhook_base_url is not configured
+      - org_id is missing (we cannot route without it)
+      - all retries are exhausted
+    """
+    base_url = settings.webhook_base_url
+    conn_key = settings.webhook_conn_key
     dlq_path = settings.precheck_dlq
     event_type = str(event.get("schema") or event.get("type") or "unknown")
     correlation = correlation_id or event.get("correlationId")
@@ -127,14 +135,22 @@ async def emit_event(
         correlation = event["data"].get("correlationId")
     emit_started_at = time.time()
 
-    if not webhook_url:
-        _write_dlq(event, "webhook_url_not_configured", dlq_path)
+    if not base_url:
+        _write_dlq(event, "webhook_base_url_not_configured", dlq_path)
         record_webhook_event(event_type, "failed", 0.0)
         return
 
-    websocket_url = webhook_url
-    # Extract key from URL for connection-level auth — never logged
-    _, _, conn_api_key = _parse_webhook_url(webhook_url)
+    if not org_id:
+        _write_dlq(event, "missing_org_id", dlq_path)
+        record_webhook_event(event_type, "failed", 0.0)
+        return
+
+    try:
+        websocket_url = build_webhook_url(base_url, org_id, conn_key)
+    except ValueError as e:
+        _write_dlq(event, f"invalid_webhook_url:{type(e).__name__}", dlq_path)
+        record_webhook_event(event_type, "failed", 0.0)
+        return
 
     message = json.dumps(event, separators=(",", ":"), ensure_ascii=False)
 
@@ -142,7 +158,7 @@ async def emit_event(
     err = "no_attempts"
     for attempt in range(1, settings.webhook_max_retries + 1):
         try:
-            await _send_via_websocket(websocket_url, message, conn_api_key, correlation)
+            await _send_via_websocket(websocket_url, message, conn_key, correlation)
             logger.debug("event emitted attempt=%d", attempt)
             record_webhook_event(event_type, "success", time.time() - emit_started_at)
             return
@@ -159,7 +175,7 @@ async def emit_event(
                 try:
                     fallback_url = websocket_url.replace("wss://", "ws://", 1)
                     await _send_via_websocket(
-                        fallback_url, message, conn_api_key, correlation
+                        fallback_url, message, conn_key, correlation
                     )
                     logger.debug("event emitted via ssl fallback attempt=%d", attempt)
                     record_webhook_event(

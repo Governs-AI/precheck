@@ -12,7 +12,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
 from .auth import AuthContext, require_api_key
-from .events import emit_event, get_webhook_config
+from .events import emit_event
 from .log import audit_log
 from .metrics import (
     get_metrics,
@@ -340,20 +340,19 @@ async def precheck(
         # Extract PII information from reasons
         pii_types, confidence = extract_pii_info_from_reasons(result.get("reasons", []))
 
-        # Get webhook configuration from URL (fallback if no API key from header/env)
-        webhook_org_id, webhook_channel, webhook_api_key = get_webhook_config()
-
-        # Use API key from request if available, otherwise fall back to webhook API key
-        final_api_key = api_key or webhook_api_key or ""
+        # Per-org routing: org_id comes from the authenticated key record (DL-1).
+        # The decisions channel is derived from that org_id, never from a global env var.
+        decisions_channel = f"org:{org_id}:decisions" if org_id else None
+        final_api_key = api_key or ""
 
         # Build event (always send, even if orgId or channel are None)
         event = {
             "type": "INGEST",
-            "channel": webhook_channel,
+            "channel": decisions_channel,
             "schema": "decision.v1",
             "idempotencyKey": f"precheck-{start_ts}-{correlation_id}",
             "data": {
-                "orgId": webhook_org_id,
+                "orgId": org_id,
                 "direction": "precheck",
                 "decision": result["decision"],
                 "tool": req.tool,
@@ -384,10 +383,12 @@ async def precheck(
 
         # Fire and forget (don't block response path)
         try:
-            asyncio.create_task(emit_event(event, correlation_id=correlation_id))
+            asyncio.create_task(
+                emit_event(event, org_id=org_id, correlation_id=correlation_id)
+            )
         except RuntimeError:
             # If no running loop (tests), do it inline once
-            await emit_event(event, correlation_id=correlation_id)
+            await emit_event(event, org_id=org_id, correlation_id=correlation_id)
 
         # Audit log before response
         audit_log(
@@ -494,20 +495,18 @@ async def postcheck(
         # Extract PII information from reasons
         pii_types, confidence = extract_pii_info_from_reasons(result.get("reasons", []))
 
-        # Get webhook configuration from URL (fallback if no API key from header/env)
-        webhook_org_id, webhook_channel, webhook_api_key = get_webhook_config()
-
-        # Use API key from request if available, otherwise fall back to webhook API key
-        final_api_key = api_key or webhook_api_key or ""
+        # Per-org routing: org_id comes from the authenticated key record (DL-1).
+        decisions_channel = f"org:{org_id}:decisions" if org_id else None
+        final_api_key = api_key or ""
 
         # Build event (always send, even if orgId or channel are None)
         event = {
             "type": "INGEST",
-            "channel": webhook_channel,
+            "channel": decisions_channel,
             "schema": "decision.v1",
             "idempotencyKey": f"postcheck-{start_ts}-{correlation_id}",
             "data": {
-                "orgId": webhook_org_id,
+                "orgId": org_id,
                 "direction": "postcheck",
                 "decision": result["decision"],
                 "tool": req.tool,
@@ -538,10 +537,12 @@ async def postcheck(
 
         # Fire and forget (don't block response path)
         try:
-            asyncio.create_task(emit_event(event, correlation_id=correlation_id))
+            asyncio.create_task(
+                emit_event(event, org_id=org_id, correlation_id=correlation_id)
+            )
         except RuntimeError:
             # If no running loop (tests), do it inline once
-            await emit_event(event, correlation_id=correlation_id)
+            await emit_event(event, org_id=org_id, correlation_id=correlation_id)
 
         # Audit log before response
         audit_log(
