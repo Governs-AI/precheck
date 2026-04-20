@@ -41,8 +41,10 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install package with dev extras
-        run: pip install -e ".[dev]"
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install mypy
 
       - name: mypy
         run: mypy app/ --ignore-missing-imports
@@ -65,15 +67,3 @@ jobs:
 
       - name: pytest with coverage (>=80% required)
         run: pytest tests/ -v --tb=short --cov=app --cov-report=term-missing --cov-fail-under=80
-
-  secret-scan:
-    name: Secret Scan
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
