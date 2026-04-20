@@ -10,22 +10,26 @@ Verifies:
 """
 
 import os
+
 os.environ.setdefault("KEY_HMAC_SECRET", "test-hmac-secret-for-ci-only")
 
-import pytest
 from datetime import datetime, timedelta
+
+import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from fastapi import HTTPException
 
-from app.storage import Base, APIKey
-from app.auth import require_api_key, AuthContext
-from app.key_utils import hash_api_key, generate_api_key
+from app.auth import AuthContext, require_api_key
+from app.key_utils import generate_api_key, hash_api_key
+from app.storage import APIKey, Base
 
 
 @pytest.fixture
 def db_session():
-    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    engine = create_engine(
+        "sqlite:///:memory:", connect_args={"check_same_thread": False}
+    )
     Base.metadata.create_all(bind=engine)
     Session = sessionmaker(bind=engine)
     session = Session()
@@ -38,14 +42,16 @@ def db_session():
 
 def _insert_key(session, *, org_id, is_active=True, expires_at=None):
     raw_key, key_hash, key_prefix = generate_api_key()
-    session.add(APIKey(
-        key_hash=key_hash,
-        key_prefix=key_prefix,
-        user_id="user-001",
-        org_id=org_id,
-        is_active=is_active,
-        expires_at=expires_at,
-    ))
+    session.add(
+        APIKey(
+            key_hash=key_hash,
+            key_prefix=key_prefix,
+            user_id="user-001",
+            org_id=org_id,
+            is_active=is_active,
+            expires_at=expires_at,
+        )
+    )
     session.commit()
     return raw_key
 
