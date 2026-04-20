@@ -35,6 +35,7 @@ class APIKey(Base):
     key_hash = Column(String, primary_key=True)
     key_prefix = Column(String, nullable=False)  # e.g. "GAI_ab12" — safe to display
     user_id = Column(String, nullable=False)
+    org_id = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     is_active = Column(Boolean, default=True)
     expires_at = Column(DateTime, nullable=True)

@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
@@ -9,11 +10,21 @@ from .metrics import record_auth_failure
 from .storage import APIKey, get_db
 
 
+@dataclass(frozen=True)
+class AuthContext:
+    raw_key: str
+    org_id: Optional[str]
+
+
 async def require_api_key(
     x_governs_key: Optional[str] = Header(None, alias="X-Governs-Key"),
     db: Session = Depends(get_db),
-) -> str:
-    """Validate API key by comparing HMAC hash — never stores or compares plaintext."""
+) -> AuthContext:
+    """Validate API key by comparing HMAC hash — never stores or compares plaintext.
+
+    Returns AuthContext(raw_key, org_id) so downstream handlers can route
+    decisions to the correct org without re-querying the api_keys table.
+    """
     if not x_governs_key:
         record_auth_failure("missing_api_key")
         raise HTTPException(status_code=401, detail="missing api key")
@@ -29,4 +40,4 @@ async def require_api_key(
         record_auth_failure("expired_api_key")
         raise HTTPException(status_code=401, detail="api key expired")
 
-    return x_governs_key
+    return AuthContext(raw_key=x_governs_key, org_id=record.org_id)

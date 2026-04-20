@@ -11,7 +11,7 @@ from typing import List, Optional, Tuple
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
-from .auth import require_api_key
+from .auth import AuthContext, require_api_key
 from .events import emit_event, get_webhook_config
 from .log import audit_log
 from .metrics import (
@@ -79,18 +79,24 @@ def extract_pii_info_from_reasons(
 
 @router.post("/v1/keys/rotate")
 async def rotate_api_key(
-    api_key: str = Depends(require_api_key),
+    auth: AuthContext = Depends(require_api_key),
     db: Session = Depends(get_db),
 ):
     """Rotate the authenticated API key: create a new key and deactivate the old one."""
-    record = db.query(APIKey).filter(APIKey.key == api_key).first()
+    from .key_utils import generate_api_key, hash_api_key
+
+    record = (
+        db.query(APIKey).filter(APIKey.key_hash == hash_api_key(auth.raw_key)).first()
+    )
     if not record:
         raise HTTPException(status_code=404, detail="key not found")
 
-    new_key_value = "GAI_" + secrets.token_urlsafe(32)
+    new_raw_key, new_key_hash, new_key_prefix = generate_api_key()
     new_record = APIKey(
-        key=new_key_value,
+        key_hash=new_key_hash,
+        key_prefix=new_key_prefix,
         user_id=record.user_id,
+        org_id=record.org_id,
         is_active=True,
         expires_at=record.expires_at,
     )
@@ -98,16 +104,20 @@ async def rotate_api_key(
     record.is_active = False
     db.commit()
 
-    return {"key": new_key_value, "user_id": record.user_id}
+    return {"key": new_raw_key, "user_id": record.user_id, "org_id": record.org_id}
 
 
 @router.post("/v1/keys/revoke")
 async def revoke_api_key(
-    api_key: str = Depends(require_api_key),
+    auth: AuthContext = Depends(require_api_key),
     db: Session = Depends(get_db),
 ):
     """Revoke the authenticated API key (deactivates it immediately)."""
-    record = db.query(APIKey).filter(APIKey.key == api_key).first()
+    from .key_utils import hash_api_key
+
+    record = (
+        db.query(APIKey).filter(APIKey.key_hash == hash_api_key(auth.raw_key)).first()
+    )
     if not record:
         raise HTTPException(status_code=404, detail="key not found")
 
@@ -259,8 +269,12 @@ async def metrics():
 
 
 @router.post("/v1/precheck", response_model=DecisionResponse)
-async def precheck(req: PrePostCheckRequest, api_key: str = Depends(require_api_key)):
+async def precheck(
+    req: PrePostCheckRequest, auth: AuthContext = Depends(require_api_key)
+):
     """Precheck endpoint for policy evaluation and PII redaction"""
+    api_key = auth.raw_key
+    org_id = auth.org_id
     # User ID is optional - websocket will resolve from API key if needed
     user_id = req.user_id
     correlation_id = _ensure_correlation_id(req.corr_id)
@@ -409,8 +423,12 @@ async def precheck(req: PrePostCheckRequest, api_key: str = Depends(require_api_
 
 
 @router.post("/v1/postcheck", response_model=DecisionResponse)
-async def postcheck(req: PrePostCheckRequest, api_key: str = Depends(require_api_key)):
+async def postcheck(
+    req: PrePostCheckRequest, auth: AuthContext = Depends(require_api_key)
+):
     """Postcheck endpoint for post-execution validation"""
+    api_key = auth.raw_key
+    org_id = auth.org_id
     # User ID is optional - websocket will resolve from API key if needed
     user_id = req.user_id
     correlation_id = _ensure_correlation_id(req.corr_id)
