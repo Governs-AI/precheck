@@ -11,25 +11,54 @@ import os
 
 # --- env vars must be set before any app.* import ---
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
-os.environ.setdefault("DEBUG", "true")           # bypasses secret-validator
+os.environ.setdefault("DEBUG", "true")  # bypasses secret-validator
 os.environ.setdefault("PII_TOKEN_SALT", "test-salt-for-ci-only")
 os.environ.setdefault("WEBHOOK_SECRET", "test-webhook-secret-ci")
-os.environ.setdefault("REDIS_URL", "")           # disable Redis in rate-limiter
+os.environ.setdefault("REDIS_URL", "")  # disable Redis in rate-limiter
 os.environ.setdefault("WEBHOOK_BASE_URL", "")
 os.environ.setdefault("WEBHOOK_CONN_KEY", "")
+# KEY_HMAC_SECRET must be set before key_utils is imported
+os.environ.setdefault("KEY_HMAC_SECRET", "test-hmac-secret-for-ci-only")
 
 import pytest
 from datetime import datetime, timedelta
-from sqlalchemy import create_engine
+from dataclasses import dataclass
+from typing import Optional
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.storage import Base, APIKey, get_db
+from app.key_utils import hash_api_key
+
+
+@dataclass
+class _APIKeyWithRaw:
+    """Wraps a stored APIKey and exposes .key so test code can use it in headers."""
+
+    _record: APIKey
+    key: str  # the raw plaintext key (never stored in DB)
+
+    @property
+    def is_active(self) -> bool:
+        return bool(self._record.is_active)
+
+    @property
+    def expires_at(self) -> Optional[datetime]:
+        return self._record.expires_at  # type: ignore[return-value]
+
 
 # ---------------------------------------------------------------------------
-# In-memory SQLite engine shared across the session
+# In-memory SQLite engine shared across the session.
+# StaticPool ensures all connections share the same in-memory DB so that
+# tables created by create_all() are visible to every subsequent query.
 # ---------------------------------------------------------------------------
 SQLITE_URL = "sqlite:///:memory:"
-_engine = create_engine(SQLITE_URL, connect_args={"check_same_thread": False})
+_engine = create_engine(
+    SQLITE_URL,
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
+)
 _TestSession = sessionmaker(autocommit=False, autoflush=False, bind=_engine)
 
 
@@ -54,43 +83,49 @@ def db_session():
 @pytest.fixture
 def active_api_key(db_session):
     """Insert and return an active, non-expired API key."""
-    key = APIKey(
-        key="GAI_test_valid_key_12345",
+    raw = "GAI_test_valid_key_12345"
+    record = APIKey(
+        key_hash=hash_api_key(raw),
+        key_prefix=raw[:8],
         user_id="user-test-001",
         is_active=True,
         expires_at=None,
     )
-    db_session.add(key)
+    db_session.add(record)
     db_session.commit()
-    return key
+    return _APIKeyWithRaw(_record=record, key=raw)
 
 
 @pytest.fixture
 def expired_api_key(db_session):
     """Insert and return an expired API key."""
-    key = APIKey(
-        key="GAI_test_expired_key_99",
+    raw = "GAI_test_expired_key_99"
+    record = APIKey(
+        key_hash=hash_api_key(raw),
+        key_prefix=raw[:8],
         user_id="user-test-002",
         is_active=True,
         expires_at=datetime.utcnow() - timedelta(hours=1),
     )
-    db_session.add(key)
+    db_session.add(record)
     db_session.commit()
-    return key
+    return _APIKeyWithRaw(_record=record, key=raw)
 
 
 @pytest.fixture
 def inactive_api_key(db_session):
     """Insert and return a revoked (inactive) API key."""
-    key = APIKey(
-        key="GAI_test_inactive_key_00",
+    raw = "GAI_test_inactive_key_00"
+    record = APIKey(
+        key_hash=hash_api_key(raw),
+        key_prefix=raw[:8],
         user_id="user-test-003",
         is_active=False,
         expires_at=None,
     )
-    db_session.add(key)
+    db_session.add(record)
     db_session.commit()
-    return key
+    return _APIKeyWithRaw(_record=record, key=raw)
 
 
 @pytest.fixture

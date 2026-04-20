@@ -23,7 +23,6 @@ import tempfile
 import pytest
 from unittest.mock import patch
 
-
 # ---------------------------------------------------------------------------
 # Module-level patches applied for the entire file
 # ---------------------------------------------------------------------------
@@ -213,7 +212,10 @@ class TestIsPasswordField:
 
 class TestAnonymizeTextPresidioFallback:
     def test_returns_original_text_when_presidio_disabled(self):
-        with patch("app.policies.USE_PRESIDIO", False), patch("app.policies.ANALYZER", None):
+        with (
+            patch("app.policies.USE_PRESIDIO", False),
+            patch("app.policies.ANALYZER", None),
+        ):
             from app.policies import anonymize_text_presidio
 
             text = "alice@example.com"
@@ -229,7 +231,10 @@ class TestAnonymizeTextPresidioFallback:
 
 class TestRedactObj:
     def _redact(self, obj, field_name=""):
-        with patch("app.policies.USE_PRESIDIO", False), patch("app.policies.ANALYZER", None):
+        with (
+            patch("app.policies.USE_PRESIDIO", False),
+            patch("app.policies.ANALYZER", None),
+        ):
             from app.policies import redact_obj
 
             return redact_obj(obj, field_name=field_name)
@@ -273,7 +278,10 @@ class TestRedactObj:
 
 class TestApplyToolAccessText:
     def _apply(self, tool, findings, raw_text, policy_override=None):
-        with patch("app.policies.USE_PRESIDIO", False), patch("app.policies.ANALYZER", None):
+        with (
+            patch("app.policies.USE_PRESIDIO", False),
+            patch("app.policies.ANALYZER", None),
+        ):
             if policy_override is not None:
                 with patch("app.policies.get_policy", return_value=policy_override):
                     from app.policies import apply_tool_access_text
@@ -293,7 +301,14 @@ class TestApplyToolAccessText:
                 }
             }
         }
-        findings = [{"type": "PII:email_address", "start": 0, "end": 17, "text": "alice@example.com"}]
+        findings = [
+            {
+                "type": "PII:email_address",
+                "start": 0,
+                "end": 17,
+                "text": "alice@example.com",
+            }
+        ]
         _, reasons = self._apply("model.chat", findings, "alice@example.com", policy)
         assert any("allowed" in r for r in reasons)
 
@@ -306,18 +321,38 @@ class TestApplyToolAccessText:
                 }
             }
         }
-        findings = [{"type": "PII:email_address", "start": 0, "end": 17, "text": "alice@example.com"}]
-        transformed, reasons = self._apply("model.chat", findings, "alice@example.com", policy)
+        findings = [
+            {
+                "type": "PII:email_address",
+                "start": 0,
+                "end": 17,
+                "text": "alice@example.com",
+            }
+        ]
+        transformed, reasons = self._apply(
+            "model.chat", findings, "alice@example.com", policy
+        )
         assert any("tokenized" in r for r in reasons)
         assert "alice" not in transformed
 
     def test_no_policy_falls_back_to_redact(self):
         # No policy for this tool → apply_tool_access_text does regex redaction
         policy = {"tool_access": {}, "defaults": {}}
-        findings = [{"type": "PII:email_address", "start": 0, "end": 17, "text": "alice@example.com"}]
-        transformed, reasons = self._apply("unknown.tool", findings, "alice@example.com", policy)
+        findings = [
+            {
+                "type": "PII:email_address",
+                "start": 0,
+                "end": 17,
+                "text": "alice@example.com",
+            }
+        ]
+        transformed, reasons = self._apply(
+            "unknown.tool", findings, "alice@example.com", policy
+        )
         # Fallback redaction triggered
-        assert any("redacted" in r for r in reasons) or transformed != "alice@example.com"
+        assert (
+            any("redacted" in r for r in reasons) or transformed != "alice@example.com"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +379,10 @@ class TestEvaluatePolicyDefaults:
         assert "default.ingress.deny" in result["reasons"]
 
     def test_global_default_pass_through(self):
-        policy = {"defaults": {"ingress": {"action": "pass_through"}}, "tool_access": {}}
+        policy = {
+            "defaults": {"ingress": {"action": "pass_through"}},
+            "tool_access": {},
+        }
         result = self._evaluate("model.chat", "local", "hello", policy)
         assert result["decision"] == "allow"
 
@@ -370,7 +408,9 @@ class TestEvaluatePolicyNetworkToolsPrefix:
         ):
             from app.policies import _evaluate_policy
 
-            result = _evaluate_policy("web.search", None, "email me at dev@example.com", int(time.time()))
+            result = _evaluate_policy(
+                "web.search", None, "email me at dev@example.com", int(time.time())
+            )
         # web.* triggers network redaction level
         assert result["decision"] == "transform"
 
@@ -403,7 +443,9 @@ class TestEvaluatePolicyStrictFallback:
         ):
             from app.policies import _evaluate_policy
 
-            result = _evaluate_policy("model.chat", "local", "hello world", int(time.time()))
+            result = _evaluate_policy(
+                "model.chat", "local", "hello world", int(time.time())
+            )
         assert result["decision"] in {"allow", "transform"}
 
     def test_text_with_email_in_strict_fallback_transforms(self):
@@ -416,7 +458,9 @@ class TestEvaluatePolicyStrictFallback:
         ):
             from app.policies import _evaluate_policy
 
-            result = _evaluate_policy("model.chat", "local", "reach me at dev@example.com", int(time.time()))
+            result = _evaluate_policy(
+                "model.chat", "local", "reach me at dev@example.com", int(time.time())
+            )
         assert result["decision"] in {"transform", "allow"}
 
 
@@ -434,7 +478,9 @@ class TestEvaluateWithPayloadPolicy:
         ):
             from app.policies import evaluate_with_payload_policy
 
-            result = evaluate_with_payload_policy("python.exec", "local", "import os", int(time.time()))
+            result = evaluate_with_payload_policy(
+                "python.exec", "local", "import os", int(time.time())
+            )
         # DENY_TOOLS path should deny
         assert result["decision"] == "deny"
 
@@ -452,6 +498,10 @@ class TestEvaluateWithPayloadPolicy:
                 "defaults": {"ingress": {"action": "pass_through"}},
             }
             result = evaluate_with_payload_policy(
-                "model.chat", "local", "hello", int(time.time()), policy_config=policy_config
+                "model.chat",
+                "local",
+                "hello",
+                int(time.time()),
+                policy_config=policy_config,
             )
         assert result["decision"] in {"allow", "transform"}

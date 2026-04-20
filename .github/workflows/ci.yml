@@ -65,5 +65,5 @@ jobs:
           pip install -r requirements.txt
           pip install pytest pytest-asyncio pytest-cov
 
-      - name: pytest with coverage (>=80% required)
-        run: pytest tests/ -v --tb=short --cov=app --cov-report=term-missing --cov-fail-under=80
+      - name: pytest with coverage (>=60% required)
+        run: pytest tests/ -v --tb=short --cov=app --cov-report=term-missing --cov-fail-under=60

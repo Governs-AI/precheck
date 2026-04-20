@@ -18,7 +18,6 @@ import pytest
 from urllib.parse import urlsplit, parse_qs
 from unittest.mock import AsyncMock
 
-
 # ---------------------------------------------------------------------------
 # build_webhook_url — pure URL construction
 # ---------------------------------------------------------------------------
@@ -62,7 +61,9 @@ class TestBuildWebhookUrl:
             ),
         ],
     )
-    def test_url_construction(self, base, org, conn_key, expected_org, expected_channel, expected_key):
+    def test_url_construction(
+        self, base, org, conn_key, expected_org, expected_channel, expected_key
+    ):
         from app.events import build_webhook_url
 
         url = build_webhook_url(base, org, conn_key)
@@ -99,7 +100,9 @@ class TestBuildWebhookUrl:
 
         # If a prior URL had stale routing params, they must not bleed through
         # to a different org's connection.
-        stale = "ws://gw/ws?org=stale-org&key=stale-key&channels=org:stale-org:decisions"
+        stale = (
+            "ws://gw/ws?org=stale-org&key=stale-key&channels=org:stale-org:decisions"
+        )
         url = build_webhook_url(stale, "fresh-org", "fresh-key")
         qs = parse_qs(urlsplit(url).query)
         assert qs["org"] == ["fresh-org"]
@@ -127,6 +130,7 @@ class TestBuildWebhookUrl:
 class TestWriteDlq:
     def test_creates_file_on_first_write(self, tmp_path):
         from app.events import _write_dlq
+
         dlq = str(tmp_path / "sub" / "test.dlq.jsonl")
         event = {"type": "decision", "tool": "model.chat"}
         _write_dlq(event, "test_error", dlq_path=dlq)
@@ -134,6 +138,7 @@ class TestWriteDlq:
 
     def test_appends_valid_json_line(self, tmp_path):
         from app.events import _write_dlq
+
         dlq = str(tmp_path / "test.dlq.jsonl")
         event = {"type": "decision", "tool": "model.chat"}
         _write_dlq(event, "network_failure", dlq_path=dlq)
@@ -145,6 +150,7 @@ class TestWriteDlq:
 
     def test_multiple_events_append(self, tmp_path):
         from app.events import _write_dlq
+
         dlq = str(tmp_path / "test.dlq.jsonl")
         _write_dlq({"id": 1}, "err1", dlq_path=dlq)
         _write_dlq({"id": 2}, "err2", dlq_path=dlq)
@@ -195,14 +201,18 @@ class TestEmitEventRouting:
     async def test_routes_to_org_specific_url(self, monkeypatch):
         from app import events as ev_module
 
-        monkeypatch.setattr(ev_module.settings, "webhook_base_url", "wss://gw.example.com/ws/gateway")
+        monkeypatch.setattr(
+            ev_module.settings, "webhook_base_url", "wss://gw.example.com/ws/gateway"
+        )
         monkeypatch.setattr(ev_module.settings, "webhook_conn_key", "GAI_conn_key")
         monkeypatch.setattr(ev_module.settings, "webhook_max_retries", 1)
 
         mock_send = AsyncMock()
         monkeypatch.setattr(ev_module, "_send_via_websocket", mock_send)
 
-        await ev_module.emit_event({"type": "decision"}, org_id="org-acme", correlation_id="corr-1")
+        await ev_module.emit_event(
+            {"type": "decision"}, org_id="org-acme", correlation_id="corr-1"
+        )
 
         mock_send.assert_called_once()
         call_url = mock_send.call_args[0][0]
@@ -306,7 +316,9 @@ class TestEmitEventRetryExhaustion:
         monkeypatch.setattr(ev_module.settings, "webhook_conn_key", "k")
         monkeypatch.setattr(ev_module.settings, "webhook_max_retries", 3)
         monkeypatch.setattr(ev_module.settings, "webhook_backoff_base_ms", 1)
-        monkeypatch.setattr(ev_module.settings, "precheck_dlq", str(tmp_path / "r.jsonl"))
+        monkeypatch.setattr(
+            ev_module.settings, "precheck_dlq", str(tmp_path / "r.jsonl")
+        )
 
         call_count = {"n": 0}
 

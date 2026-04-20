@@ -34,7 +34,8 @@ def build_webhook_url(
 
     parts = urlsplit(base_url)
     existing = [
-        (k, v) for (k, v) in parse_qsl(parts.query, keep_blank_values=True)
+        (k, v)
+        for (k, v) in parse_qsl(parts.query, keep_blank_values=True)
         if k not in ("org", "key", "channels")
     ]
     new_params = [("org", org_id)]
@@ -76,7 +77,7 @@ def _set_dlq_size(path: str) -> None:
         logger.warning("Failed to set DLQ size: %s", type(e).__name__)
 
 
-async def _sleep_ms(ms: int):
+async def _sleep_ms(ms: int) -> None:
     """Sleep for specified milliseconds"""
     await asyncio.sleep(ms / 1000.0)
 
@@ -163,21 +164,28 @@ async def emit_event(
             err = f"websocket_exception:{type(e).__name__}:{str(e)[:200]}"
             logger.warning(
                 "websocket emit attempt %d/%d failed: %s",
-                attempt, settings.webhook_max_retries, type(e).__name__,
+                attempt,
+                settings.webhook_max_retries,
+                type(e).__name__,
             )
 
             if "SSL" in str(e) and websocket_url.startswith("wss://"):
                 try:
                     fallback_url = websocket_url.replace("wss://", "ws://", 1)
-                    await _send_via_websocket(fallback_url, message, conn_key, correlation)
+                    await _send_via_websocket(
+                        fallback_url, message, conn_key, correlation
+                    )
                     logger.debug("event emitted via ssl fallback attempt=%d", attempt)
-                    record_webhook_event(event_type, "success", time.time() - emit_started_at)
+                    record_webhook_event(
+                        event_type, "success", time.time() - emit_started_at
+                    )
                     return
                 except Exception as fallback_e:
                     err = f"websocket_fallback_exception:{type(fallback_e).__name__}:{str(fallback_e)[:200]}"
                     logger.warning(
                         "websocket ssl fallback attempt %d failed: %s",
-                        attempt, type(fallback_e).__name__,
+                        attempt,
+                        type(fallback_e).__name__,
                     )
 
         if attempt == settings.webhook_max_retries:
