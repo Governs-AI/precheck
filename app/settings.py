@@ -1,6 +1,7 @@
-from pydantic_settings import BaseSettings
-from pydantic import model_validator
 from typing import Optional
+
+from pydantic import model_validator
+from pydantic_settings import BaseSettings
 
 _DEFAULT_SALT = "default-salt-change-in-production"
 _DEFAULT_WEBHOOK_SECRET = "dev-secret"

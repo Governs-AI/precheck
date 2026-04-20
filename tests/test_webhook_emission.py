@@ -14,9 +14,10 @@ Covers:
 
 import json
 import pathlib
-import pytest
-from urllib.parse import urlsplit, parse_qs
 from unittest.mock import AsyncMock
+from urllib.parse import parse_qs, urlsplit
+
+import pytest
 
 # ---------------------------------------------------------------------------
 # build_webhook_url — pure URL construction

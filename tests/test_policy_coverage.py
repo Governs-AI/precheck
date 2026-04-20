@@ -16,12 +16,13 @@ Targets paths in app/policies.py not exercised by test_policy_engine.py:
   - anonymize_text_presidio()  — USE_PRESIDIO=False short-circuit
 """
 
-import os
 import json
-import time
+import os
 import tempfile
-import pytest
+import time
 from unittest.mock import patch
+
+import pytest
 
 # ---------------------------------------------------------------------------
 # Module-level patches applied for the entire file

@@ -1,13 +1,15 @@
+import json
+import logging
+import sys
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from contextlib import asynccontextmanager
+
 from .api import router
-from .storage import create_tables
 from .settings import settings
-import logging
-import sys
-import json
+from .storage import create_tables
 
 
 def _configure_logging() -> None:

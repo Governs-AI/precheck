@@ -1,17 +1,19 @@
+from datetime import datetime
+from typing import Optional
+
 from sqlalchemy import (
-    create_engine,
-    Column,
-    String,
-    Integer,
-    DateTime,
-    Text,
     Boolean,
+    Column,
+    DateTime,
     Float,
+    Integer,
+    String,
+    Text,
+    create_engine,
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from datetime import datetime
-from typing import Optional
+
 from .settings import settings
 
 Base = declarative_base()

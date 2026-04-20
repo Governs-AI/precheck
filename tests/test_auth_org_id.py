@@ -13,15 +13,16 @@ import os
 
 os.environ.setdefault("KEY_HMAC_SECRET", "test-hmac-secret-for-ci-only")
 
-import pytest
 from datetime import datetime, timedelta
+
+import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from fastapi import HTTPException
 
-from app.storage import Base, APIKey
-from app.auth import require_api_key, AuthContext
-from app.key_utils import hash_api_key, generate_api_key
+from app.auth import AuthContext, require_api_key
+from app.key_utils import generate_api_key, hash_api_key
+from app.storage import APIKey, Base
 
 
 @pytest.fixture

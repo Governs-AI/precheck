@@ -10,8 +10,9 @@ Covers the regex-based fallback path (no spaCy/Presidio required in CI):
   - Regex patterns for API key and JWT formats
 """
 
-import pytest
 from unittest.mock import patch
+
+import pytest
 
 # ---------------------------------------------------------------------------
 # anonymize_text_regex — pure regex path (USE_PRESIDIO=False)

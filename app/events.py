@@ -1,13 +1,15 @@
-import json
-import time
-import pathlib
 import asyncio
+import json
 import logging
-import websockets
-from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
+import pathlib
+import time
 from typing import Any, Dict, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+import websockets
+
+from .metrics import record_dlq_event, record_webhook_event, set_dlq_size
 from .settings import settings
-from .metrics import record_webhook_event, record_dlq_event, set_dlq_size
 
 logger = logging.getLogger(__name__)
 

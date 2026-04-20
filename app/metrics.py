@@ -2,16 +2,17 @@
 Prometheus metrics for GovernsAI Precheck service
 """
 
+import time
+from typing import Any, Dict
+
 from prometheus_client import (
+    CONTENT_TYPE_LATEST,
     Counter,
-    Histogram,
     Gauge,
+    Histogram,
     Info,
     generate_latest,
-    CONTENT_TYPE_LATEST,
 )
-from typing import Dict, Any
-import time
 
 # Counter metrics
 precheck_requests_total = Counter(

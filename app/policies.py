@@ -1,15 +1,21 @@
+import hashlib
+import os
 import re
 import time
-import hashlib
-import yaml
-import os
 from copy import deepcopy
-from typing import Tuple, Any, Dict, List, Set, Optional
-from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
-from presidio_anonymizer import AnonymizerEngine
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+import yaml
+from presidio_analyzer import (
+    AnalyzerEngine,
+    Pattern,
+    PatternRecognizer,
+    RecognizerRegistry,
+)
 from presidio_analyzer.nlp_engine import SpacyNlpEngine
-from presidio_analyzer import RecognizerRegistry
+from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
+
 from .settings import settings
 
 # Fallback regex patterns for when Presidio is not available
@@ -1490,9 +1496,9 @@ def _apply_strict_fallback(
     if payment_findings and budget_context and policy_config:
         try:
             from .budget import (
+                check_budget_with_context,
                 estimate_request_cost,
                 get_purchase_amount,
-                check_budget_with_context,
             )
 
             # Get model from policy config or tool config
@@ -1603,9 +1609,9 @@ def _check_budget_and_apply(
 
     try:
         from .budget import (
+            check_budget_with_context,
             estimate_request_cost,
             get_purchase_amount,
-            check_budget_with_context,
             update_budget_after_decision,
         )
 
@@ -1680,9 +1686,9 @@ def _add_budget_info_to_result(
 
     try:
         from .budget import (
+            check_budget_with_context,
             estimate_request_cost,
             get_purchase_amount,
-            check_budget_with_context,
         )
 
         # Only add budget info if budget_context is provided

@@ -1,32 +1,34 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Response, Depends
+import asyncio
+import hashlib
+import json
+import logging
+import os
+import secrets
+import time
+from datetime import datetime
+from typing import List, Optional, Tuple
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
-from .models import PrePostCheckRequest, DecisionResponse
-from .policies import evaluate, evaluate_with_payload_policy
-from .rate_limit import rate_limiter
+
+from .auth import AuthContext, require_api_key
 from .events import emit_event
 from .log import audit_log
 from .metrics import (
     get_metrics,
     get_metrics_content_type,
-    set_service_info,
-    record_precheck_request,
-    record_postcheck_request,
     record_policy_evaluation,
+    record_postcheck_request,
+    record_precheck_request,
     record_request_error,
     set_active_requests,
+    set_service_info,
 )
+from .models import DecisionResponse, PrePostCheckRequest
+from .policies import evaluate, evaluate_with_payload_policy
+from .rate_limit import rate_limiter
 from .settings import settings
-from .auth import require_api_key, AuthContext
-from .storage import get_db, APIKey
-import logging
-import time
-import asyncio
-import hashlib
-import json
-import secrets
-import os
-from datetime import datetime
-from typing import List, Tuple, Optional
+from .storage import APIKey, get_db
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +83,7 @@ async def rotate_api_key(
     db: Session = Depends(get_db),
 ):
     """Rotate the authenticated API key: create a new key and deactivate the old one."""
-    from .key_utils import hash_api_key, generate_api_key
+    from .key_utils import generate_api_key, hash_api_key
 
     record = (
         db.query(APIKey).filter(APIKey.key_hash == hash_api_key(auth.raw_key)).first()
@@ -141,9 +143,10 @@ async def ready():
     - Policy file parsing and validation
     - Core dependencies availability
     """
+    import os
+
     from .policies import ANALYZER, ANONYMIZER, USE_PRESIDIO, get_policy
     from .settings import settings
-    import os
 
     checks = {}
     overall_ready = True

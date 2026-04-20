@@ -20,16 +20,17 @@ os.environ.setdefault("WEBHOOK_CONN_KEY", "")
 # KEY_HMAC_SECRET must be set before key_utils is imported
 os.environ.setdefault("KEY_HMAC_SECRET", "test-hmac-secret-for-ci-only")
 
-import pytest
-from datetime import datetime, timedelta
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Optional
+
+import pytest
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.storage import Base, APIKey, get_db
 from app.key_utils import hash_api_key
+from app.storage import APIKey, Base, get_db
 
 
 @dataclass
@@ -132,6 +133,7 @@ def inactive_api_key(db_session):
 def test_client(db_session):
     """FastAPI TestClient with the in-memory DB injected."""
     from fastapi.testclient import TestClient
+
     from app.main import create_app
 
     def override_get_db():

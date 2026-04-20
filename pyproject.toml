@@ -100,7 +100,15 @@ warn_unreachable = false
 strict_equality = true
 
 [[tool.mypy.overrides]]
-module = ["app.storage", "app.budget", "app.rate_limit"]
+module = [
+    "app.storage",
+    "app.budget",
+    "app.rate_limit",
+    "app.metrics",
+    "app.auth",
+    "app.policies",
+    "app.api",
+]
 ignore_errors = true
 
 [tool.pytest.ini_options]
