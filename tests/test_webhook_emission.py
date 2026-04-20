@@ -104,7 +104,7 @@ class TestEmitEventNoDlq:
     async def test_no_webhook_url_writes_dlq(self, tmp_path, monkeypatch):
         from app import events as ev_module
 
-        monkeypatch.setattr(ev_module.settings, "webhook_url", "")
+        monkeypatch.setattr(ev_module.settings, "webhook_base_url", "")
         dlq_path = str(tmp_path / "no_url.dlq.jsonl")
         monkeypatch.setattr(ev_module.settings, "precheck_dlq", dlq_path)
 
@@ -128,7 +128,7 @@ class TestEmitEventSuccess:
 
         monkeypatch.setattr(
             ev_module.settings,
-            "webhook_url",
+            "webhook_base_url",
             "ws://localhost:3003?org=org1&key=GAI_key",
         )
         monkeypatch.setattr(ev_module.settings, "webhook_max_retries", 1)
@@ -153,7 +153,7 @@ class TestEmitEventSuccess:
         from app import events as ev_module
 
         monkeypatch.setattr(
-            ev_module.settings, "webhook_url", "ws://localhost:3003?org=o&key=k"
+            ev_module.settings, "webhook_base_url", "ws://localhost:3003?org=o&key=k"
         )
         monkeypatch.setattr(ev_module.settings, "webhook_max_retries", 1)
 
@@ -183,7 +183,7 @@ class TestEmitEventRetryExhaustion:
         from app import events as ev_module
 
         monkeypatch.setattr(
-            ev_module.settings, "webhook_url", "ws://localhost:3003?org=o&key=k"
+            ev_module.settings, "webhook_base_url", "ws://localhost:3003?org=o&key=k"
         )
         monkeypatch.setattr(ev_module.settings, "webhook_max_retries", 2)
         monkeypatch.setattr(ev_module.settings, "webhook_backoff_base_ms", 1)
@@ -206,7 +206,7 @@ class TestEmitEventRetryExhaustion:
         from app import events as ev_module
 
         monkeypatch.setattr(
-            ev_module.settings, "webhook_url", "ws://localhost:3003?org=o&key=k"
+            ev_module.settings, "webhook_base_url", "ws://localhost:3003?org=o&key=k"
         )
         monkeypatch.setattr(ev_module.settings, "webhook_max_retries", 3)
         monkeypatch.setattr(ev_module.settings, "webhook_backoff_base_ms", 1)

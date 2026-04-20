@@ -45,7 +45,7 @@ def _parse_webhook_url(
 
 def get_webhook_config() -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """Get organization ID, webhook channel, and API key from webhook URL"""
-    webhook_url = settings.webhook_url
+    webhook_url = settings.webhook_base_url
     if not webhook_url:
         return None, None, None
     return _parse_webhook_url(webhook_url)
@@ -119,7 +119,7 @@ async def emit_event(
     Authenticates the connection before sending, so the raw API key never
     travels inside the INGEST payload.
     Falls back to DLQ (jsonl) after retries."""
-    webhook_url = settings.webhook_url
+    webhook_url = settings.webhook_base_url
     dlq_path = settings.precheck_dlq
     event_type = str(event.get("schema") or event.get("type") or "unknown")
     correlation = correlation_id or event.get("correlationId")
