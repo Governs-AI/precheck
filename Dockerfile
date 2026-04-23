@@ -18,8 +18,26 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 # Download spaCy models for Presidio
+# English (default, used today by the analyzer)
 RUN python -m spacy download en_core_web_sm && \
     python -m spacy download en_core_web_lg
+
+# Multilingual models (GOV-585 / TASKS.md §3.5a).
+# These are pre-installed so the image is ready to serve non-English PII
+# detection once the NLP engine config is enabled per-org in 3.5b+.
+# Kept as a separate layer so the English-only base is still cache-hot for
+# builds that don't touch multilingual code.
+RUN python -m spacy download es_core_news_sm && \
+    python -m spacy download fr_core_news_sm && \
+    python -m spacy download de_core_news_sm && \
+    python -m spacy download zh_core_web_sm
+
+# Fail the image build if any multilingual model fails to load. This is the
+# acceptance check for TASKS.md §3.5a — each model must load without errors in
+# the precheck container — and it prints the cold-load time per model so the
+# startup cost is visible in CI logs.
+COPY scripts/smoke_multilingual_pii.py /tmp/smoke_multilingual_pii.py
+RUN python /tmp/smoke_multilingual_pii.py && rm /tmp/smoke_multilingual_pii.py
 
 # Verify Presidio installation and download required models
 RUN python -c "from presidio_analyzer import AnalyzerEngine; \
