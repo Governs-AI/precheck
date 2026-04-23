@@ -71,3 +71,54 @@ jobs:
 
       - name: pytest with coverage (>=60% required)
         run: pytest tests/ -v --tb=short --cov=app --cov-report=term-missing --cov-fail-under=60
+
+  smoke:
+    name: Smoke (deployed)
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    if: github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install httpx
+        run: pip install httpx
+
+      - name: Health check
+        run: |
+          python - <<'EOF'
+          import httpx, sys, time
+          url = "https://governs-precheck.onrender.com/api/v1/health"
+          for attempt in range(3):
+              try:
+                  r = httpx.get(url, timeout=30)
+                  if r.status_code == 200:
+                      print(f"health ok: {r.status_code}")
+                      sys.exit(0)
+              except Exception as e:
+                  print(f"attempt {attempt+1} failed: {e}")
+              time.sleep(5)
+          print("health check failed after 3 attempts")
+          sys.exit(1)
+          EOF
+
+      - name: Precheck smoke request
+        env:
+          SMOKE_API_KEY: ${{ secrets.SMOKE_API_KEY }}
+        run: |
+          python - <<'EOF'
+          import httpx, sys, os
+          key = os.environ.get("SMOKE_API_KEY", "")
+          if not key:
+              print("SMOKE_API_KEY secret not set — skipping precheck smoke")
+              sys.exit(0)
+          r = httpx.post(
+              "https://governs-precheck.onrender.com/api/v1/precheck",
+              headers={"X-Governs-Key": key},
+              json={"tool": "chat", "raw_text": "smoke test hello world"},
+              timeout=30,
+          )
+          print(f"status={r.status_code} body={r.text[:200]}")
+          sys.exit(0 if r.status_code in (200, 201) else 1)
+          EOF
