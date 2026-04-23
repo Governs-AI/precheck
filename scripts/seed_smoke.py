@@ -23,6 +23,7 @@ SMOKE_ORG_ID = "smoke-test-org"
 
 
 def main() -> None:
+    reset = "--reset" in sys.argv
     db_url = os.environ.get("DB_URL") or os.environ.get("DATABASE_URL")
     hmac_secret = os.environ.get("KEY_HMAC_SECRET")
     if not db_url:
@@ -90,7 +91,13 @@ def main() -> None:
             db.add(budget)
             print("created budget: $100/month")
 
-        # API key — only create if none exists for this user
+        # API key — delete existing if --reset so we can re-seed with correct HMAC
+        if reset:
+            deleted = db.query(APIKey).filter_by(user_id=SMOKE_USER_ID).delete()
+            if deleted:
+                db.commit()
+                print(f"deleted {deleted} existing key(s) for {SMOKE_USER_ID}")
+
         existing = db.query(APIKey).filter_by(user_id=SMOKE_USER_ID).first()
         if existing:
             print(f"\nAPI key already exists — key_prefix: {existing.key_prefix}")
