@@ -285,7 +285,11 @@ async def precheck(
     else:
         rate_limit_key = f"precheck:key:{api_key}"
     if not rate_limiter.is_allowed(rate_limit_key, limit=100, window=60):
-        raise HTTPException(status_code=429, detail="rate limit exceeded")
+        raise HTTPException(
+            status_code=429,
+            detail="rate limit exceeded",
+            headers={"Retry-After": "60"},
+        )
 
     # Metrics: Track active requests
     set_active_requests("precheck", 1)
@@ -440,7 +444,11 @@ async def postcheck(
     else:
         rate_limit_key = f"postcheck:key:{api_key}"
     if not rate_limiter.is_allowed(rate_limit_key, limit=100, window=60):
-        raise HTTPException(status_code=429, detail="rate limit exceeded")
+        raise HTTPException(
+            status_code=429,
+            detail="rate limit exceeded",
+            headers={"Retry-After": "60"},
+        )
 
     # Metrics: Track active requests
     set_active_requests("postcheck", 1)
