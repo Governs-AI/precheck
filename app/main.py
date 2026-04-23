@@ -1,6 +1,7 @@
 import json
 import logging
 import sys
+import time
 import uuid
 from contextlib import asynccontextmanager
 
@@ -54,6 +55,14 @@ def create_app() -> FastAPI:
         request_id = str(uuid.uuid4())
         response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
+        return response
+
+    @app.middleware("http")
+    async def response_time_middleware(request: Request, call_next):
+        start = time.monotonic()
+        response = await call_next(request)
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        response.headers["X-Response-Time-Ms"] = str(elapsed_ms)
         return response
 
     app.include_router(router, prefix="/api")
