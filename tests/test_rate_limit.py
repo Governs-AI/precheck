@@ -50,3 +50,28 @@ def test_in_memory_fallback_resets_after_window(monkeypatch):
 
     now[0] = 1011.0
     assert limiter.is_allowed("user-c", limit=1, window=10) is True
+
+
+def test_clear_resets_in_memory_fallback_state():
+    limiter = RateLimiter(redis_url=None)
+
+    assert limiter.is_allowed("user-d", limit=1, window=60) is True
+    assert limiter.is_allowed("user-d", limit=1, window=60) is False
+
+    limiter.clear()
+
+    assert limiter.is_allowed("user-d", limit=1, window=60) is True
+
+
+def test_retry_after_uses_sliding_window(monkeypatch):
+    limiter = RateLimiter(redis_url=None)
+    now = [1000.0]
+
+    monkeypatch.setattr("app.rate_limit.time.time", lambda: now[0])
+
+    assert limiter.is_allowed("user-e", limit=2, window=10) is True
+    assert limiter.is_allowed("user-e", limit=2, window=10) is True
+
+    now[0] = 1004.0
+    assert limiter.is_allowed("user-e", limit=2, window=10) is False
+    assert limiter.retry_after("user-e", limit=2, window=10) == 6
