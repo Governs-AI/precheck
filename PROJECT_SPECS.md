@@ -191,6 +191,10 @@ GET /api/metrics
 
 **Response**: Prometheus text format with counters, histograms, and gauges
 
+### Standard Response Headers
+- **`X-Request-ID`**: Unique UUID generated for each request for trace correlation
+- **`X-Response-Time-Ms`**: Integer request duration in milliseconds added to every response
+
 ### Precheck Endpoint
 ```
 POST /api/v1/precheck
