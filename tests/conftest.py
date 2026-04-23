@@ -17,7 +17,7 @@ os.environ.setdefault("WEBHOOK_SECRET", "test-webhook-secret-ci")
 os.environ.setdefault("REDIS_URL", "")  # disable Redis in rate-limiter
 os.environ.setdefault("WEBHOOK_BASE_URL", "")
 os.environ.setdefault("WEBHOOK_CONN_KEY", "")
-# KEY_HMAC_SECRET must be set before key_utils is imported
+# Keep a test-safe default for API key hashing.
 os.environ.setdefault("KEY_HMAC_SECRET", "test-hmac-secret-for-ci-only")
 
 from dataclasses import dataclass
