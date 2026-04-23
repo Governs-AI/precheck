@@ -29,6 +29,7 @@ class Settings(BaseSettings):
 
     # API configuration — demo_api_key intentionally removed; all keys must live in DB
     api_key_header: str = "X-Governs-Key"
+    key_hmac_secret: str = ""  # REQUIRED in production; loaded from KEY_HMAC_SECRET env var
 
     # Webhook configuration
     # Base URL of the dashboard websocket gateway (e.g. wss://host/ws/gateway).
