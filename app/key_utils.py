@@ -5,6 +5,7 @@ import secrets
 
 def _hmac_secret() -> bytes:
     from .settings import settings
+
     if not settings.key_hmac_secret:
         raise RuntimeError("KEY_HMAC_SECRET environment variable is required")
     return settings.key_hmac_secret.encode()
