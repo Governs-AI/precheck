@@ -12,6 +12,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
 from .auth import AuthContext, require_api_key
+from .decision_cache import allow_decision_cache
 from .events import emit_event
 from .log import audit_log
 from .metrics import (
@@ -40,6 +41,28 @@ RATE_LIMIT_WINDOW_SECONDS = 60
 def _ensure_correlation_id(corr_id: Optional[str]) -> str:
     """Return an existing correlation ID or generate a new one."""
     return corr_id or f"corr-{secrets.token_hex(12)}"
+
+
+def _build_allow_cache_key(req: PrePostCheckRequest, org_id: Optional[str]) -> str:
+    policy_version = req.policy_config.version if req.policy_config else "legacy"
+    payload = {
+        "content": req.raw_text,
+        "tool": req.tool,
+        "policy_version": policy_version,
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"precheck:allow:{org_id or 'no-org'}:{digest}"
+
+
+def _is_cacheable_allow_result(req: PrePostCheckRequest, result: dict) -> bool:
+    return (
+        req.budget_context is None
+        and result.get("decision") == "allow"
+        and result.get("budget_status") is None
+        and result.get("budget_info") is None
+    )
 
 
 def extract_pii_info_from_reasons(
@@ -272,7 +295,9 @@ async def metrics():
 
 @router.post("/v1/precheck", response_model=DecisionResponse)
 async def precheck(
-    req: PrePostCheckRequest, auth: AuthContext = Depends(require_api_key)
+    req: PrePostCheckRequest,
+    response: Response,
+    auth: AuthContext = Depends(require_api_key),
 ):
     """Precheck endpoint for policy evaluation and PII redaction"""
     api_key = auth.raw_key
@@ -303,50 +328,65 @@ async def precheck(
 
     start_time = time.time()
     start_ts = int(start_time)
+    cache_key = _build_allow_cache_key(req, org_id)
 
     try:
         logger.debug(
             "precheck request", extra={"tool": req.tool, "corr_id": correlation_id}
         )
 
-        # Use new policy evaluation with payload policies
-        policy_config = req.policy_config.model_dump() if req.policy_config else None
-        tool_config = req.tool_config.model_dump() if req.tool_config else None
-        budget_context = req.budget_context.model_dump() if req.budget_context else None
-        result = evaluate_with_payload_policy(
-            tool=req.tool,
-            scope=req.scope,
-            raw_text=req.raw_text,
-            now=start_ts,
-            direction="ingress",
-            policy_config=policy_config,
-            tool_config=tool_config,
-            user_id=user_id,
-            budget_context=budget_context,
-        )
+        cached_result = allow_decision_cache.get(cache_key)
+        if cached_result is not None:
+            response.headers["X-Cache"] = "HIT"
+            result = cached_result
+        else:
+            response.headers["X-Cache"] = "MISS"
 
-        # Add budget info to result if not already present
-        if user_id and tool_config and policy_config and budget_context:
-            from .policies import _add_budget_info_to_result
-
-            result = _add_budget_info_to_result(
-                result,
-                user_id,
-                req.tool,
-                req.raw_text,
-                tool_config,
-                policy_config,
-                budget_context,
+            # Use new policy evaluation with payload policies
+            policy_config = (
+                req.policy_config.model_dump() if req.policy_config else None
+            )
+            tool_config = req.tool_config.model_dump() if req.tool_config else None
+            budget_context = (
+                req.budget_context.model_dump() if req.budget_context else None
+            )
+            result = evaluate_with_payload_policy(
+                tool=req.tool,
+                scope=req.scope,
+                raw_text=req.raw_text,
+                now=start_ts,
+                direction="ingress",
+                policy_config=policy_config,
+                tool_config=tool_config,
+                user_id=user_id,
+                budget_context=budget_context,
             )
 
-        # Metrics: Record policy evaluation
-        policy_eval_duration = time.time() - start_time
-        record_policy_evaluation(
-            tool=req.tool,
-            direction="ingress",
-            policy_id=result.get("policy_id", "unknown"),
-            duration=policy_eval_duration,
-        )
+            # Add budget info to result if not already present
+            if user_id and tool_config and policy_config and budget_context:
+                from .policies import _add_budget_info_to_result
+
+                result = _add_budget_info_to_result(
+                    result,
+                    user_id,
+                    req.tool,
+                    req.raw_text,
+                    tool_config,
+                    policy_config,
+                    budget_context,
+                )
+
+            if _is_cacheable_allow_result(req, result):
+                allow_decision_cache.set(cache_key, result)
+
+            # Metrics: Record policy evaluation
+            policy_eval_duration = time.time() - start_time
+            record_policy_evaluation(
+                tool=req.tool,
+                direction="ingress",
+                policy_id=result.get("policy_id", "unknown"),
+                duration=policy_eval_duration,
+            )
 
         # Extract PII information from reasons
         pii_types, confidence = extract_pii_info_from_reasons(result.get("reasons", []))

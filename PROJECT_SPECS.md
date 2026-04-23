@@ -32,6 +32,7 @@ GovernsAI Precheck is a policy evaluation and PII redaction service that provide
 - **Dead Letter Queue (DLQ)**: Failed webhook deliveries stored in JSONL format
 - **Retry logic**: Exponential backoff with configurable retry attempts
 - **Event schema**: Versioned event format for backward compatibility
+- **Allow-decision cache**: Redis-first cache for identical `allow` decisions with a short TTL
 
 ### 5. Failure Contract & Error Handling
 - **Configurable error behavior**: `block`, `pass`, or `best_effort` modes
@@ -194,6 +195,7 @@ GET /api/metrics
 ### Standard Response Headers
 - **`X-Request-ID`**: Unique UUID generated for each request for trace correlation
 - **`X-Response-Time-Ms`**: Integer request duration in milliseconds added to every response
+- **`X-Cache`**: Cache outcome for `/api/v1/precheck` responses (`HIT` or `MISS`)
 
 ### Precheck Endpoint
 ```
