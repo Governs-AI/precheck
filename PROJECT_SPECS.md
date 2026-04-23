@@ -466,6 +466,74 @@ ws://172.16.10.59:3002/api/ws/gateway?key=gai_827eode3nxa&org=dfy&channels=org:c
 
 ## Policy Configuration
 
+### Canonical Policy-As-Code Schema
+
+Policy-as-code files are validated against the canonical JSON Schema at
+`schemas/policy.schema.json`. The existing `policy.tool_access.yaml` fallback
+file remains supported, and the canonical contract extends that legacy shape
+with explicit sections for PII, budgets, and rate limits so YAML round-trip
+import/export can converge on a single format.
+
+Reference files:
+- `schemas/policy.schema.json`
+- `examples/policies/minimal.yaml`
+- `examples/policies/standard.yaml`
+- `examples/policies/enterprise.yaml`
+
+```yaml
+version: v1
+defaults:
+  ingress:
+    action: redact
+  egress:
+    action: redact
+
+pii:
+  detection: auto
+  default_action: redact
+  entity_rules:
+    "PII:api_key":
+      action: deny
+    "PII:us_ssn":
+      action: tokenize
+
+tool_access:
+  verify_identity:
+    direction: ingress
+    action: confirm
+    allow_pii:
+      "PII:email_address": pass_through
+      "PII:us_ssn": tokenize
+
+budget:
+  scope: user
+  monthly_limit_usd: 500
+  warning_threshold_percent: 90
+  block_on_exceeded: true
+  require_context: true
+
+rate_limits:
+  default:
+    requests: 100
+    window_seconds: 60
+    key: user
+
+deny_tools:
+  - python.exec
+  - bash.exec
+  - code.exec
+  - shell.exec
+network_scopes:
+  - net.
+network_tools:
+  - web.
+  - http.
+  - fetch.
+  - request.
+on_error: block
+model: gpt-4
+```
+
 ### Tool Access Policy (`policy.tool_access.yaml`)
 
 ```yaml
@@ -505,6 +573,7 @@ tool_access:
 - **`tokenize`**: Replace PII with stable token (e.g., `pii_8797942a`)
 - **`redact`**: Apply standard redaction (e.g., `<USER_EMAIL>`, `<USER_SSN>`)
 - **`deny`**: Block the request entirely
+- **`confirm`**: Require an approval/confirmation step before tool execution
 
 ### Global Defaults
 
