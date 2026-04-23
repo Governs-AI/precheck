@@ -1,15 +1,14 @@
 import hashlib
 import hmac
-import os
 import secrets
-
-_KEY_HMAC_SECRET = os.environ.get("KEY_HMAC_SECRET", "").encode()
 
 
 def _hmac_secret() -> bytes:
-    if not _KEY_HMAC_SECRET:
+    from .settings import settings
+
+    if not settings.key_hmac_secret:
         raise RuntimeError("KEY_HMAC_SECRET environment variable is required")
-    return _KEY_HMAC_SECRET
+    return settings.key_hmac_secret.encode()
 
 
 def hash_api_key(raw_key: str) -> str:
