@@ -33,6 +33,8 @@ from .storage import APIKey, get_db
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+RATE_LIMIT_REQUESTS = 100
+RATE_LIMIT_WINDOW_SECONDS = 60
 
 
 def _ensure_correlation_id(corr_id: Optional[str]) -> str:
@@ -284,11 +286,16 @@ async def precheck(
         rate_limit_key = f"precheck:{user_id}"
     else:
         rate_limit_key = f"precheck:key:{api_key}"
-    if not rate_limiter.is_allowed(rate_limit_key, limit=100, window=60):
+    if not rate_limiter.is_allowed(
+        rate_limit_key, limit=RATE_LIMIT_REQUESTS, window=RATE_LIMIT_WINDOW_SECONDS
+    ):
+        retry_after = rate_limiter.retry_after(
+            rate_limit_key, limit=RATE_LIMIT_REQUESTS, window=RATE_LIMIT_WINDOW_SECONDS
+        )
         raise HTTPException(
             status_code=429,
             detail="rate limit exceeded",
-            headers={"Retry-After": "60"},
+            headers={"Retry-After": str(max(1, retry_after))},
         )
 
     # Metrics: Track active requests
@@ -443,11 +450,16 @@ async def postcheck(
         rate_limit_key = f"postcheck:{user_id}"
     else:
         rate_limit_key = f"postcheck:key:{api_key}"
-    if not rate_limiter.is_allowed(rate_limit_key, limit=100, window=60):
+    if not rate_limiter.is_allowed(
+        rate_limit_key, limit=RATE_LIMIT_REQUESTS, window=RATE_LIMIT_WINDOW_SECONDS
+    ):
+        retry_after = rate_limiter.retry_after(
+            rate_limit_key, limit=RATE_LIMIT_REQUESTS, window=RATE_LIMIT_WINDOW_SECONDS
+        )
         raise HTTPException(
             status_code=429,
             detail="rate limit exceeded",
-            headers={"Retry-After": "60"},
+            headers={"Retry-After": str(max(1, retry_after))},
         )
 
     # Metrics: Track active requests
