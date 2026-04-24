@@ -5,6 +5,11 @@ from pydantic_settings import BaseSettings
 
 _DEFAULT_SALT = "dev-pii-token-salt-change-in-production"
 _DEFAULT_WEBHOOK_SECRET = "dev-webhook-secret-change-in-production"
+# Debug HMAC keys are deterministic and publicly known. Never restore a debug
+# database into a non-debug environment — any API-key HMAC signed with this
+# marker is trivially forgeable. The model validator below rejects this value
+# for KEY_HMAC_SECRET in all environments (including DEBUG=true) because the
+# key identity boundary must never resolve to a shared default.
 _DEFAULT_KEY_HMAC_SECRET = "dev-key-hmac-secret-change-in-production"
 _MIN_SECRET_LENGTH = 32
 
@@ -35,6 +40,9 @@ class Settings(BaseSettings):
 
     # API configuration — demo_api_key intentionally removed; all keys must live in DB
     api_key_header: str = "X-Governs-Key"
+    # HMAC secret used to derive API-key identity hashes. This is the API-key
+    # identity boundary, so the dev default marker is rejected in every
+    # environment (see _reject_default_secrets below) — not only in production.
     key_hmac_secret: str = _DEFAULT_KEY_HMAC_SECRET
 
     # Webhook configuration
@@ -64,6 +72,15 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _reject_default_secrets(self) -> "Settings":
+        # KEY_HMAC_SECRET is the API-key identity boundary: a shared default
+        # here means any caller can forge a valid key hash. Reject the dev
+        # marker even in DEBUG mode — the operator must supply a unique value.
+        if self.key_hmac_secret == _DEFAULT_KEY_HMAC_SECRET:
+            raise ValueError(
+                "KEY_HMAC_SECRET must be replaced with a unique, high-entropy "
+                "value in every environment (including debug); the dev default "
+                "is deterministic and publicly known."
+            )
         if not self.debug:
             self._validate_secret(
                 name="PII_TOKEN_SALT",
