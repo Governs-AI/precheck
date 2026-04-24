@@ -27,15 +27,12 @@ from .metrics import (
 )
 from .models import DecisionResponse, PrePostCheckRequest
 from .policies import evaluate, evaluate_with_payload_policy
-from .rate_limit import rate_limiter
 from .settings import settings
 from .storage import APIKey, get_db
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-RATE_LIMIT_REQUESTS = 100
-RATE_LIMIT_WINDOW_SECONDS = 60
 
 
 def _ensure_correlation_id(corr_id: Optional[str]) -> str:
@@ -306,22 +303,8 @@ async def precheck(
     user_id = req.user_id
     correlation_id = _ensure_correlation_id(req.corr_id)
 
-    # Rate limiting (100 requests per minute per user/api_key)
-    if user_id:
-        rate_limit_key = f"precheck:{user_id}"
-    else:
-        rate_limit_key = f"precheck:key:{api_key}"
-    if not rate_limiter.is_allowed(
-        rate_limit_key, limit=RATE_LIMIT_REQUESTS, window=RATE_LIMIT_WINDOW_SECONDS
-    ):
-        retry_after = rate_limiter.retry_after(
-            rate_limit_key, limit=RATE_LIMIT_REQUESTS, window=RATE_LIMIT_WINDOW_SECONDS
-        )
-        raise HTTPException(
-            status_code=429,
-            detail="rate limit exceeded",
-            headers={"Retry-After": str(max(1, retry_after))},
-        )
+    # Rate limiting is enforced by app.rate_limit_middleware before this
+    # handler runs — see app/rate_limit_middleware.py.
 
     # Metrics: Track active requests
     set_active_requests("precheck", 1)
@@ -485,22 +468,8 @@ async def postcheck(
     user_id = req.user_id
     correlation_id = _ensure_correlation_id(req.corr_id)
 
-    # Rate limiting (100 requests per minute per user/api_key)
-    if user_id:
-        rate_limit_key = f"postcheck:{user_id}"
-    else:
-        rate_limit_key = f"postcheck:key:{api_key}"
-    if not rate_limiter.is_allowed(
-        rate_limit_key, limit=RATE_LIMIT_REQUESTS, window=RATE_LIMIT_WINDOW_SECONDS
-    ):
-        retry_after = rate_limiter.retry_after(
-            rate_limit_key, limit=RATE_LIMIT_REQUESTS, window=RATE_LIMIT_WINDOW_SECONDS
-        )
-        raise HTTPException(
-            status_code=429,
-            detail="rate limit exceeded",
-            headers={"Retry-After": str(max(1, retry_after))},
-        )
+    # Rate limiting is enforced by app.rate_limit_middleware before this
+    # handler runs — see app/rate_limit_middleware.py.
 
     # Metrics: Track active requests
     set_active_requests("postcheck", 1)

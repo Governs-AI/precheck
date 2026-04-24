@@ -10,6 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from .api import router
+from .rate_limit_middleware import install_rate_limit_middleware
 from .settings import settings
 from .storage import create_tables
 
@@ -49,6 +50,11 @@ def create_app() -> FastAPI:
         description="Policy evaluation and PII redaction service for GovernsAI",
         lifespan=lifespan,
     )
+
+    # Middleware registration order is inside-out: the LAST decorator runs
+    # OUTERMOST. Install rate limiting first so request_id and response_time
+    # still apply to 429 / 503 responses.
+    install_rate_limit_middleware(app)
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
