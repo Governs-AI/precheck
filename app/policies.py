@@ -20,6 +20,7 @@ from .settings import settings
 
 # Fallback regex patterns for when Presidio is not available
 EMAIL = re.compile(r"\b([A-Za-z0-9._%+-])[^@\s]*(@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\b")
+SSN = re.compile(r"\b(?!000|666|9\d{2})\d{3}-\d{2}-\d{4}\b")
 PHONE = re.compile(r"\+?\d[\d\s\-\(\)]{7,}\d")
 CARD = re.compile(r"\b(?:\d[ -]*?){13,19}\b")
 PHI_MRN = re.compile(
@@ -465,6 +466,7 @@ def detect_regex_pii_findings(raw_text: str) -> List[Dict[str, Any]]:
     findings: List[Dict[str, Any]] = []
 
     _append_regex_findings(findings, EMAIL, "PII:email_address", raw_text, 0.8)
+    _append_regex_findings(findings, SSN, "PII:us_ssn", raw_text, 0.9)
     _append_regex_findings(findings, PHONE, "PII:phone_number", raw_text, 0.8)
 
     for match in CARD.finditer(raw_text):
@@ -840,44 +842,14 @@ def _evaluate_policy(
 
     # PRECEDENCE LEVEL 2: Tool-specific access rules (highest priority for non-dangerous tools)
     if tool in tool_access and tool_access[tool].get("direction") == direction:
-        # Run PII detection on raw text
-        findings = []
-        if USE_PRESIDIO and ANALYZER is not None:
-            results = ANALYZER.analyze(
-                text=raw_text, entities=list(ANONYMIZE_OPERATORS.keys()), language="en"
-            )
-            for r in results:
-                if not is_false_positive(r.entity_type, "", raw_text):
-                    findings.append(
-                        {
-                            "type": f"PII:{r.entity_type.lower()}",
-                            "start": r.start,
-                            "end": r.end,
-                            "score": r.score,
-                            "text": raw_text[r.start : r.end],
-                        }
-                    )
-
-        # Apply tool-specific transformations based on findings
-        if findings:
-            transformed_text, tool_reasons = apply_tool_access_text(
-                tool, findings, raw_text
-            )
-            return {
-                "decision": "transform",
-                "raw_text_out": transformed_text,
-                "reasons": tool_reasons,
-                "policy_id": "tool-access",
-                "ts": now,
-            }
-        else:
-            # No PII found, pass through
-            return {
-                "decision": "allow",
-                "raw_text_out": raw_text,
-                "policy_id": "tool-access",
-                "ts": now,
-            }
+        # Keep the static YAML path aligned with the payload-driven evaluator so
+        # regex fallback and tool-specific allow/tokenize behavior stay consistent.
+        return _apply_tool_specific_policy_dynamic(
+            tool=tool,
+            raw_text=raw_text,
+            now=now,
+            tool_policy=tool_access[tool],
+        )
 
     # PRECEDENCE LEVEL 3: Global defaults for this direction
     default_action = defaults.get(direction, {}).get("action", "redact")
@@ -1322,22 +1294,23 @@ def apply_tool_access_text_dynamic(
 
         if action == "pass_through":
             # Keep original text
+            reasons.append(f"pii.allowed:{pii_type}")
             continue
         elif action == "tokenize":
             # Replace with token
             token = tokenize(original_text)
             transformed = transformed[:start] + token + transformed[end:]
-            reasons.append(f"tokenized:{pii_type}")
+            reasons.append(f"pii.tokenized:{pii_type}")
         elif action == "redact":
             # Replace with placeholder
             placeholder = f"[{pii_type.upper()}]"
             transformed = transformed[:start] + placeholder + transformed[end:]
-            reasons.append(f"redacted:{pii_type}")
+            reasons.append(f"pii.redacted:{pii_type}")
         elif action == "deny":
             # This should be handled at a higher level, but just redact here
             placeholder = f"[{pii_type.upper()}]"
             transformed = transformed[:start] + placeholder + transformed[end:]
-            reasons.append(f"redacted:{pii_type}")
+            reasons.append(f"pii.redacted:{pii_type}")
 
     return transformed, reasons
 
