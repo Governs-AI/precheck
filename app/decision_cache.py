@@ -2,23 +2,35 @@ import json
 import logging
 import threading
 import time
-from typing import Dict, Optional, Tuple
+from types import ModuleType
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 from .settings import settings
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from redis import Redis
+else:  # pragma: no cover - runtime-only fallback for optional typing
+    Redis = Any
+
+_redis_module: Optional[ModuleType] = None
+imported_redis_module: Optional[ModuleType]
+
 try:
-    import redis
+    import redis as imported_redis_module
 except Exception:  # pragma: no cover - exercised in environments without redis package
-    redis = None
+    imported_redis_module = None
+
+_redis_module = imported_redis_module
+redis: Optional[ModuleType] = _redis_module
 
 
 class AllowDecisionCache:
     """Redis-first cache for cacheable allow decisions."""
 
     def __init__(self, redis_url: Optional[str] = None, ttl_seconds: int = 60):
-        self.redis_client = None
+        self.redis_client: Optional[Redis] = None
         self.ttl_seconds = max(0, int(ttl_seconds))
         self._local_lock = threading.Lock()
         self._local_store: Dict[str, Tuple[float, str]] = {}
@@ -79,12 +91,28 @@ class AllowDecisionCache:
             self._last_cleanup = 0.0
 
     def _get_redis(self, key: str) -> Optional[Dict]:
-        payload = self.redis_client.get(key)
+        client = self.redis_client
+        if client is None:
+            return None
+
+        payload = client.get(key)
         if payload is None:
             return None
+
         if isinstance(payload, bytes):
-            payload = payload.decode("utf-8")
-        return json.loads(payload)
+            payload_text = payload.decode("utf-8")
+        elif isinstance(payload, bytearray):
+            payload_text = bytes(payload).decode("utf-8")
+        elif isinstance(payload, str):
+            payload_text = payload
+        else:
+            logger.warning(
+                "Unexpected allow-decision cache payload type from Redis: %s",
+                type(payload).__name__,
+            )
+            return None
+
+        return json.loads(payload_text)
 
     def _get_local(self, key: str) -> Optional[Dict]:
         current_time = time.time()
