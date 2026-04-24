@@ -913,21 +913,22 @@ def evaluate_with_payload_policy(
 ) -> Dict:
     """
     Evaluate policy using payload-provided configuration
-    Falls back to static YAML if no policy_config provided
+    Falls back to the loaded static YAML policy if no policy_config is provided.
     """
 
-    if not policy_config:
-        # Fallback to current YAML-based logic
-        return evaluate(tool, scope, raw_text, now, direction)
+    resolved_policy_config = (
+        deepcopy(policy_config) if policy_config else deepcopy(get_policy())
+    )
+    resolved_policy_config["tool"] = tool
+    resolved_policy_config["scope"] = scope or ""
 
-    # Use payload-provided policy configuration
     return _evaluate_dynamic_policy(
         tool,
         scope,
         raw_text,
         now,
         direction,
-        policy_config,
+        resolved_policy_config,
         tool_config,
         user_id,
         budget_context,
@@ -1097,57 +1098,43 @@ def _apply_tool_specific_policy_dynamic(
                     }
                 )
     else:
-        findings.extend(detect_regex_pii_findings(raw_text))
+        # Detect SSNs with context first so generic phone regexes cannot claim
+        # the same span before tokenization rules get a chance to run.
+        import re
 
-    import re
+        ssn_patterns = [
+            r"\b\d{3}-\d{2}-\d{4}\b",  # XXX-XX-XXXX with dashes
+            r"\b(?!000|666|9\d{2})\d{3}[-]?(?!00)\d{2}[-]?(?!0000)\d{4}\b",  # With optional dashes
+            r"\b(?!000|666|9\d{2})\d{9}\b",  # 9 digits without dashes (if context suggests SSN)
+        ]
 
-    ssn_patterns = [
-        r"\b\d{3}-\d{2}-\d{4}\b",  # XXX-XX-XXXX with dashes
-        r"\b(?!000|666|9\d{2})\d{3}[-]?(?!00)\d{2}[-]?(?!0000)\d{4}\b",  # With optional dashes
-        r"\b(?!000|666|9\d{2})\d{9}\b",  # 9 digits without dashes (if context suggests SSN)
-    ]
+        ssn_context = re.search(
+            r"\b(ssn|social\s*security|tax\s*id|social\s*security\s*number)\b",
+            raw_text,
+            re.IGNORECASE,
+        )
 
-    # Check if text contains SSN-related context
-    ssn_context = re.search(
-        r"\b(ssn|social\s*security|tax\s*id|social\s*security\s*number)\b",
-        raw_text,
-        re.IGNORECASE,
-    )
+        for pattern in ssn_patterns:
+            for match in re.finditer(pattern, raw_text):
+                if not ssn_context and "-" not in match.group():
+                    continue
+                if _has_overlap(match.start(), match.end(), findings):
+                    continue
+                findings.append(
+                    {
+                        "type": "PII:us_ssn",
+                        "start": match.start(),
+                        "end": match.end(),
+                        "score": 0.9 if ssn_context else 0.7,
+                        "text": match.group(),
+                    }
+                )
+                break
 
-    for pattern in ssn_patterns:
-        for match in re.finditer(pattern, raw_text):
-            # Check if this SSN overlaps with any existing finding
-            overlaps = False
-            for finding in findings:
-                if not (
-                    match.end() <= finding["start"] or match.start() >= finding["end"]
-                ):
-                    overlaps = True
-                    break
-
-            # Only add if no overlap and (has context or is in standard format)
-            if not overlaps and (ssn_context or "-" in match.group()):
-                # Check if it's already detected as US_SSN
-                already_detected = False
-                for finding in findings:
-                    if (
-                        finding["type"] == "PII:us_ssn"
-                        and finding["start"] == match.start()
-                    ):
-                        already_detected = True
-                        break
-
-                if not already_detected:
-                    findings.append(
-                        {
-                            "type": "PII:us_ssn",
-                            "start": match.start(),
-                            "end": match.end(),
-                            "score": 0.9 if ssn_context else 0.7,
-                            "text": match.group(),
-                        }
-                    )
-                    break  # Only add first match per pattern
+        for finding in detect_regex_pii_findings(raw_text):
+            if _has_overlap(finding["start"], finding["end"], findings):
+                continue
+            findings.append(finding)
 
     # Apply tool-specific transformations based on findings and allow_pii rules
     if findings:
@@ -1294,25 +1281,31 @@ def apply_tool_access_text_dynamic(
 
         if action == "pass_through":
             # Keep original text
-            reasons.append(f"pii.allowed:{pii_type}")
+            reasons.extend(_tool_reason_codes("allowed", pii_type))
             continue
         elif action == "tokenize":
             # Replace with token
             token = tokenize(original_text)
             transformed = transformed[:start] + token + transformed[end:]
-            reasons.append(f"pii.tokenized:{pii_type}")
+            reasons.extend(_tool_reason_codes("tokenized", pii_type))
         elif action == "redact":
             # Replace with placeholder
             placeholder = f"[{pii_type.upper()}]"
             transformed = transformed[:start] + placeholder + transformed[end:]
-            reasons.append(f"pii.redacted:{pii_type}")
+            reasons.extend(_tool_reason_codes("redacted", pii_type))
         elif action == "deny":
             # This should be handled at a higher level, but just redact here
             placeholder = f"[{pii_type.upper()}]"
             transformed = transformed[:start] + placeholder + transformed[end:]
-            reasons.append(f"pii.redacted:{pii_type}")
+            reasons.extend(_tool_reason_codes("redacted", pii_type))
 
     return transformed, reasons
+
+
+def _tool_reason_codes(action: str, pii_type: str) -> List[str]:
+    """Emit both legacy and namespaced reason codes for API compatibility."""
+
+    return [f"{action}:{pii_type}", f"pii.{action}:{pii_type}"]
 
 
 def _apply_default_action_dynamic(
@@ -1696,11 +1689,16 @@ def _add_budget_info_to_result(
             result["reasons"] = []
 
         if budget_status.reason == "budget_ok":
-            result["reasons"].append("budget_check_passed")
+            reason = "budget_check_passed"
         elif budget_status.reason == "budget_warning":
-            result["reasons"].append("budget_warning")
+            reason = "budget_warning"
         elif budget_status.reason == "budget_exceeded":
-            result["reasons"].append("budget_exceeded")
+            reason = "budget_exceeded"
+        else:
+            reason = None
+
+        if reason and reason not in result["reasons"]:
+            result["reasons"].append(reason)
 
         return result
 
