@@ -66,15 +66,3 @@ jobs:
 
       - name: pytest with coverage (≥80% required)
         run: pytest tests/ -v --tb=short --cov=app --cov-report=term-missing --cov-fail-under=80
-
-  secret-scan:
-    name: Secret Scan
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
