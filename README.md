@@ -112,7 +112,7 @@ The service can be configured via environment variables:
 | Variable         | Default                   | Description                      |
 | ---------------- | ------------------------- | -------------------------------- |
 | `APP_BIND`       | `0.0.0.0:8080`            | Server bind address              |
-| `DB_URL`         | `sqlite:///./local.db`    | Database connection URL          |
+| `DB_URL` / `DATABASE_URL` | `sqlite:///./local.db` | Database connection URL |
 | `USE_PRESIDIO`   | `true`                    | Enable Presidio PII detection    |
 | `PRESIDIO_MODEL` | `en_core_web_sm`          | spaCy model for Presidio         |
 | `WEBHOOK_URL`    | `None`                    | Webhook URL for dashboard events |

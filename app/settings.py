@@ -1,6 +1,6 @@
+from pydantic import AliasChoices, Field, model_validator
 from typing import Optional
 
-from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 _DEFAULT_SALT = "default-salt-change-in-production"
@@ -15,7 +15,10 @@ class Settings(BaseSettings):
     debug: bool = False
 
     # Database configuration
-    db_url: str = "sqlite:///./local.db"
+    db_url: str = Field(
+        default="sqlite:///./local.db",
+        validation_alias=AliasChoices("DB_URL", "DATABASE_URL"),
+    )
 
     # Redis configuration (optional)
     redis_url: Optional[str] = None

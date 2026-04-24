@@ -842,6 +842,7 @@ Budget limits can be configured per user:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `DB_URL` / `DATABASE_URL` | Database connection URL | `sqlite:///./local.db` |
 | `PII_TOKEN_SALT` | Salt for token generation | `default-salt-change-in-production` |
 | `PRECHECK_DLQ` | Dead letter queue path | `/tmp/precheck.dlq.jsonl` |
 | `WEBHOOK_URL` | Webhook URL for events | None |
