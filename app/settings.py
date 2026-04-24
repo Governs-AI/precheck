@@ -1,6 +1,6 @@
-from pydantic import AliasChoices, Field, model_validator
 from typing import Optional
 
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings
 
 _DEFAULT_SALT = "dev-pii-token-salt-change-in-production"
