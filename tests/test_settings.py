@@ -62,3 +62,28 @@ def test_settings_reject_default_non_debug_secret_markers(monkeypatch, env_var, 
 
     with pytest.raises(ValueError, match=env_var):
         Settings(_env_file=None)
+
+
+@pytest.mark.parametrize("debug_flag", ["true", "false"])
+def test_settings_reject_default_key_hmac_secret_in_all_envs(monkeypatch, debug_flag):
+    """KEY_HMAC_SECRET is the API-key identity boundary — the dev default
+    marker must be rejected regardless of DEBUG mode."""
+    _set_non_debug_safe_env(monkeypatch)
+    monkeypatch.setenv("DEBUG", debug_flag)
+    monkeypatch.setenv("KEY_HMAC_SECRET", "dev-key-hmac-secret-change-in-production")
+
+    with pytest.raises(ValueError, match="KEY_HMAC_SECRET"):
+        Settings(_env_file=None)
+
+
+def test_settings_accept_non_default_key_hmac_in_debug(monkeypatch):
+    """DEBUG mode still accepts any non-default KEY_HMAC_SECRET, including
+    short dev-only values — only the public dev marker is rejected."""
+    monkeypatch.setenv("DEBUG", "true")
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///./debug.db")
+    monkeypatch.delenv("DB_URL", raising=False)
+    monkeypatch.setenv("KEY_HMAC_SECRET", "local-dev-unique-hmac")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.key_hmac_secret == "local-dev-unique-hmac"
