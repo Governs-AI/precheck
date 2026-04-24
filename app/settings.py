@@ -24,6 +24,7 @@ class Settings(BaseSettings):
 
     # Redis configuration (optional)
     redis_url: Optional[str] = None
+    precheck_allow_cache_ttl_seconds: int = 60
 
     # Public base URL for cloud mode
     public_base: Optional[str] = None
