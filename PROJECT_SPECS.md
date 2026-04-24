@@ -744,6 +744,12 @@ graph TD
     I --> J
 ```
 
+### Planned Sidecar Gateway (Mode 2)
+
+- Design artifact: `docs/design/sidecar-mode.md`
+- Scope: OpenAI-compatible sidecar that intercepts `POST /v1/chat/completions`, runs `precheck` before forwarding, and supports configurable `fail_open` or `fail_closed` behavior
+- Status: Design completed in GOV-563; implementation follows in task 2.1b
+
 ## Budget Management
 
 ### Overview
@@ -1116,6 +1122,11 @@ curl -X POST http://localhost:8080/api/v1/postcheck \
 ```
 
 ## Recent Changes Log
+- **2026-04-23**: Added the Mode 2 sidecar / proxy gateway design document at `docs/design/sidecar-mode.md`
+  - **Language Decision**: Recommends Go for the proxy hot path over Node.js and Python
+  - **Interception Model**: Defines `POST /v1/chat/completions` interception with `precheck` before upstream forwarding
+  - **Compatibility Contract**: Documents OpenAI drop-in behavior via `OPENAI_BASE_URL` override
+  - **Failure Handling**: Defines configurable `fail_open` and `fail_closed` behavior when `precheck` is unavailable
 - **2025-01-14**: **API Route Updates**: Simplified API routes and improved user_id handling
   - **Route Changes**: Added `/api` prefix to all routes (`/api/v1/precheck`, `/api/v1/postcheck`, etc.)
   - **User ID Handling**: Made `user_id` optional in request payload, with fallback extraction from webhook URL
