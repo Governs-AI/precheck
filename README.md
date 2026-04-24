@@ -116,6 +116,9 @@ The service can be configured via environment variables:
 | `USE_PRESIDIO`   | `true`                    | Enable Presidio PII detection    |
 | `PRESIDIO_MODEL` | `en_core_web_sm`          | spaCy model for Presidio         |
 | `WEBHOOK_URL`    | `None`                    | Webhook URL for dashboard events |
+| `WEBHOOK_SECRET` | `dev-webhook-secret-change-in-production` | Outbound webhook HMAC key |
+| `PII_TOKEN_SALT` | `dev-pii-token-salt-change-in-production` | PII tokenization salt |
+| `KEY_HMAC_SECRET` | `dev-key-hmac-secret-change-in-production` | API-key hashing secret |
 | `PRECHECK_DLQ`   | `/tmp/precheck.dlq.jsonl` | Dead letter queue file path      |
 
 ## PII Detection

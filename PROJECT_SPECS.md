@@ -843,10 +843,11 @@ Budget limits can be configured per user:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `DB_URL` / `DATABASE_URL` | Database connection URL | `sqlite:///./local.db` |
-| `PII_TOKEN_SALT` | Salt for token generation | `default-salt-change-in-production` |
+| `PII_TOKEN_SALT` | Salt for token generation | `dev-pii-token-salt-change-in-production` |
 | `PRECHECK_DLQ` | Dead letter queue path | `/tmp/precheck.dlq.jsonl` |
 | `WEBHOOK_URL` | Webhook URL for events | None |
-| `WEBHOOK_SECRET` | Secret for HMAC signing | `dev-secret` |
+| `WEBHOOK_SECRET` | Secret for HMAC signing | `dev-webhook-secret-change-in-production` |
+| `KEY_HMAC_SECRET` | Secret for API key hashing | `dev-key-hmac-secret-change-in-production` |
 | `WEBHOOK_TIMEOUT_S` | Webhook request timeout | `2.5` |
 | `WEBHOOK_MAX_RETRIES` | Maximum retry attempts | `3` |
 | `WEBHOOK_BACKOFF_BASE_MS` | Base backoff delay in ms | `150` |

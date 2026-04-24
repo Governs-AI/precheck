@@ -3,8 +3,10 @@ from typing import Optional
 
 from pydantic_settings import BaseSettings
 
-_DEFAULT_SALT = "default-salt-change-in-production"
-_DEFAULT_WEBHOOK_SECRET = "dev-secret"
+_DEFAULT_SALT = "dev-pii-token-salt-change-in-production"
+_DEFAULT_WEBHOOK_SECRET = "dev-webhook-secret-change-in-production"
+_DEFAULT_KEY_HMAC_SECRET = "dev-key-hmac-secret-change-in-production"
+_MIN_SECRET_LENGTH = 32
 
 
 class Settings(BaseSettings):
@@ -32,9 +34,7 @@ class Settings(BaseSettings):
 
     # API configuration — demo_api_key intentionally removed; all keys must live in DB
     api_key_header: str = "X-Governs-Key"
-    key_hmac_secret: str = (
-        ""  # REQUIRED in production; loaded from KEY_HMAC_SECRET env var
-    )
+    key_hmac_secret: str = _DEFAULT_KEY_HMAC_SECRET
 
     # Webhook configuration
     # Base URL of the dashboard websocket gateway (e.g. wss://host/ws/gateway).
@@ -64,17 +64,35 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _reject_default_secrets(self) -> "Settings":
         if not self.debug:
-            if self.pii_token_salt == _DEFAULT_SALT:
-                raise ValueError(
-                    "PII_TOKEN_SALT must be set to a unique, high-entropy value in production. "
-                    "Refusing to start with the default salt."
-                )
-            if self.webhook_secret == _DEFAULT_WEBHOOK_SECRET:
-                raise ValueError(
-                    "WEBHOOK_SECRET must be set to a strong random value in production. "
-                    "Refusing to start with the default 'dev-secret'."
-                )
+            self._validate_secret(
+                name="PII_TOKEN_SALT",
+                value=self.pii_token_salt,
+                default_marker=_DEFAULT_SALT,
+            )
+            self._validate_secret(
+                name="WEBHOOK_SECRET",
+                value=self.webhook_secret,
+                default_marker=_DEFAULT_WEBHOOK_SECRET,
+            )
+            self._validate_secret(
+                name="KEY_HMAC_SECRET",
+                value=self.key_hmac_secret,
+                default_marker=_DEFAULT_KEY_HMAC_SECRET,
+            )
         return self
+
+    @staticmethod
+    def _validate_secret(name: str, value: str, default_marker: str) -> None:
+        if not value:
+            raise ValueError(f"{name} must be non-empty in production.")
+        if len(value) < _MIN_SECRET_LENGTH:
+            raise ValueError(
+                f"{name} must be at least {_MIN_SECRET_LENGTH} characters in production."
+            )
+        if value == default_marker:
+            raise ValueError(
+                f"{name} must be replaced with a unique, high-entropy value in production."
+            )
 
     class Config:
         env_file = ".env"
