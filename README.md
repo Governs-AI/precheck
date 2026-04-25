@@ -213,6 +213,19 @@ python -m spacy download en_core_web_sm
 pytest tests/
 ```
 
+### Running Load Tests
+
+Seed or reactivate a test API key in your local database, then run the k6 script:
+
+```bash
+python scripts/seed_test_api_key.py --key GAI_local_load_test_key --user-id load-test-user --org-id load-test-org
+PRECHECK_API_KEY=GAI_local_load_test_key make load-test
+```
+
+The load test targets `POST /api/v1/precheck` at `100 req/s` for `30s` and spreads
+requests across synthetic `user_id` values so the aggregate traffic does not trip
+the service's per-user rate limiter.
+
 ### Code Formatting
 
 ```bash
