@@ -274,9 +274,9 @@ def test_verify_identity_tokenizes_ssn_shapes_on_both_paths(
     assert dynamic_response.status_code == 200
     static_body = static_response.json()
     dynamic_body = dynamic_response.json()
-    expected_reasons = _tool_reason_codes("allowed", "PII:email_address") | _tool_reason_codes(
-        "tokenized", "PII:us_ssn"
-    )
+    expected_reasons = _tool_reason_codes(
+        "allowed", "PII:email_address"
+    ) | _tool_reason_codes("tokenized", "PII:us_ssn")
 
     assert static_body["raw_text_out"] == dynamic_body["raw_text_out"]
     for body in (static_body, dynamic_body):
