@@ -132,7 +132,9 @@ def test_token_limit_triggers_429(test_client, active_api_key, monkeypatch):
     assert "retry-after" in {k.lower() for k in resp.headers}
 
 
-def test_rate_limit_skipped_for_health_endpoint(test_client, active_api_key, monkeypatch):
+def test_rate_limit_skipped_for_health_endpoint(
+    test_client, active_api_key, monkeypatch
+):
     """Health probes must not interact with the counter."""
     monkeypatch.setattr("app.rate_limit.time.time", lambda: 1000.0)
     # Fill the key's per-key counter via a precheck endpoint, then confirm

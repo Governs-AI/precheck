@@ -74,7 +74,8 @@ def _lookup_org_id(raw_key: str) -> Optional[str]:
         record = session.query(APIKey).filter(APIKey.key_hash == key_hash).first()
         if record is None:
             return None
-        return record.org_id
+        org_id = record.org_id
+        return str(org_id) if org_id is not None else None
     except SQLAlchemyError as exc:
         logger.warning("Rate-limit org lookup failed: %s", type(exc).__name__)
         return None
@@ -118,9 +119,7 @@ def install_rate_limit_middleware(app: FastAPI) -> None:
         key_hash = hash_api_key(raw_key)
         org_id = _lookup_org_id(raw_key)
         token_cost = _tokens_estimate(request)
-        specs = specs_for_request(
-            key_id=key_hash, org_id=org_id, token_cost=token_cost
-        )
+        specs = specs_for_request(key_id=key_hash, org_id=org_id, token_cost=token_cost)
 
         result = rate_limiter.check(specs)
 
