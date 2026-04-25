@@ -47,7 +47,7 @@ class LimitSpec:
     """One rate-limit dimension to evaluate on this request."""
 
     name: str  # e.g. "req-key", "req-org", "tokens-key", "tokens-org"
-    key: str   # Redis key prefix, e.g. "req:key:<hash>" (bucket appended at runtime)
+    key: str  # Redis key prefix, e.g. "req:key:<hash>" (bucket appended at runtime)
     limit: int
     cost: int  # 1 for request counters, token count for token counters
 
@@ -56,7 +56,7 @@ class LimitSpec:
 class LimitState:
     limit: int
     remaining: int
-    reset_in: int   # seconds until the current minute bucket ends
+    reset_in: int  # seconds until the current minute bucket ends
     retry_after: int  # seconds until a request of this cost would be permitted
 
 
@@ -141,9 +141,7 @@ class RateLimiter:
         try:
             return self._check_redis(specs, bucket, elapsed_in_current)
         except Exception as exc:
-            logger.warning(
-                "Redis rate limiter request failed: %s", type(exc).__name__
-            )
+            logger.warning("Redis rate limiter request failed: %s", type(exc).__name__)
             return self._handle_unavailable(
                 specs, reason=f"redis-error:{type(exc).__name__}"
             )
@@ -183,7 +181,10 @@ class RateLimiter:
     @staticmethod
     def _unknown_state(spec: LimitSpec) -> LimitState:
         return LimitState(
-            limit=spec.limit, remaining=spec.limit, reset_in=WINDOW_SECONDS, retry_after=0
+            limit=spec.limit,
+            remaining=spec.limit,
+            reset_in=WINDOW_SECONDS,
+            retry_after=0,
         )
 
     # ---------------------------------------------------------------- Redis
@@ -285,9 +286,7 @@ class RateLimiter:
     def _gc_local(self, bucket: int) -> None:
         """Drop buckets older than the previous one."""
         stale = [
-            k
-            for k in self._local_buckets
-            if int(k.rsplit(":", 1)[1]) < bucket - 1
+            k for k in self._local_buckets if int(k.rsplit(":", 1)[1]) < bucket - 1
         ]
         for k in stale:
             self._local_buckets.pop(k, None)

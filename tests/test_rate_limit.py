@@ -9,14 +9,16 @@ behavior (429, X-RateLimit-* headers) is exercised in test_rate_limit_http.py.
 import pytest
 
 from app.rate_limit import (
+    WINDOW_SECONDS,
     LimitSpec,
     RateLimiter,
-    WINDOW_SECONDS,
     specs_for_request,
 )
 
 
-def _specs(*, limit: int, cost: int = 1, key: str = "req:key:k1", name: str = "req-key"):
+def _specs(
+    *, limit: int, cost: int = 1, key: str = "req:key:k1", name: str = "req-key"
+):
     return [LimitSpec(name=name, key=key, limit=limit, cost=cost)]
 
 
@@ -88,12 +90,8 @@ def test_per_key_and_per_org_counters_are_independent(monkeypatch):
 
     def specs(key_id: str, org_id: str, req_limit: int, org_limit: int):
         return [
-            LimitSpec(
-                name="req-key", key=f"req:key:{key_id}", limit=req_limit, cost=1
-            ),
-            LimitSpec(
-                name="req-org", key=f"req:org:{org_id}", limit=org_limit, cost=1
-            ),
+            LimitSpec(name="req-key", key=f"req:key:{key_id}", limit=req_limit, cost=1),
+            LimitSpec(name="req-org", key=f"req:org:{org_id}", limit=org_limit, cost=1),
         ]
 
     # Key A exhausts its per-key limit (2) but stays under the per-org limit (10).
