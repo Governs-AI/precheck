@@ -910,15 +910,35 @@ def evaluate_with_payload_policy(
     tool_config: Optional[Dict] = None,
     user_id: Optional[str] = None,
     budget_context: Optional[Dict] = None,
+    org_id: Optional[str] = None,
 ) -> Dict:
     """
-    Evaluate policy using payload-provided configuration
-    Falls back to the loaded static YAML policy if no policy_config is provided.
+    Evaluate policy with the following precedence (ADR-005):
+      1. Payload `policy_config` if provided (backwards-compatible)
+      2. Dashboard-managed policy fetched by `org_id` from the shared DB
+      3. Static YAML policy (legacy fallback)
     """
 
-    resolved_policy_config = (
-        deepcopy(policy_config) if policy_config else deepcopy(get_policy())
-    )
+    if policy_config:
+        resolved_policy_config = deepcopy(policy_config)
+    else:
+        org_policy = None
+        if org_id:
+            try:
+                from .policy_source import get_active_policy
+
+                org_policy = get_active_policy(org_id)
+            except Exception as exc:  # never break the request path on a fetcher bug
+                org_policy = None
+                # Use module logger; import is local to avoid circular load risk.
+                import logging as _logging
+
+                _logging.getLogger(__name__).warning(
+                    "policy_source fetch failed for org=%s err=%s", org_id, exc
+                )
+        resolved_policy_config = (
+            deepcopy(org_policy) if org_policy else deepcopy(get_policy())
+        )
     resolved_policy_config["tool"] = tool
     resolved_policy_config["scope"] = scope or ""
 

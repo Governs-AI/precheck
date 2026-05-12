@@ -343,6 +343,7 @@ async def precheck(
                 tool_config=tool_config,
                 user_id=user_id,
                 budget_context=budget_context,
+                org_id=org_id,
             )
 
             # Add budget info to result if not already present
@@ -496,6 +497,7 @@ async def postcheck(
             tool_config=tool_config,
             user_id=user_id,
             budget_context=budget_context,
+            org_id=org_id,
         )
 
         # Add budget info to result if not already present
