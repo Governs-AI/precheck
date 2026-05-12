@@ -948,9 +948,56 @@ Budget limits can be configured per user:
 - API key extracted from `X-Governs-Key` header and forwarded to webhook events
 
 ### Rate Limiting
-- 100 requests per minute per user
-- Configurable limits and windows
-- Redis-based rate limiting (optional)
+
+Minute-bucket sliding-window counters, enforced by the
+`app.rate_limit_middleware` FastAPI middleware before any route handler runs.
+Four dimensions are evaluated per authenticated request:
+
+| Counter key                        | Default limit        |
+|------------------------------------|----------------------|
+| `req:key:{key_hash}:{minute}`      | 100 req/min          |
+| `tokens:key:{key_hash}:{minute}`   | 100,000 tokens/min   |
+| `req:org:{org_id}:{minute}`        | 1,000 req/min        |
+| `tokens:org:{org_id}:{minute}`     | 1,000,000 tokens/min |
+
+Token cost is estimated from the request `Content-Length` as `ceil(bytes / 4)`
+(standard rough heuristic) until §1.5d wires policy-driven limits and real
+tokenizer counts.
+
+All responses carry `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and
+`X-RateLimit-Reset` reflecting the most restrictive dimension. Denied
+requests return HTTP 429 with a `Retry-After` header in seconds.
+
+Unauthenticated paths (`/api/v1/health`, `/api/v1/ready`, `/api/metrics`,
+`/docs`, `/redoc`, `/openapi.json`, `/`) skip the limiter so probes cannot
+consume quota.
+
+#### Redis posture
+
+`REDIS_URL` **must** use the `rediss://` TLS scheme and carry a password in
+any non-debug environment. The `Settings` validator rejects plaintext or
+passwordless URLs — this protects counters against on-path tampering and
+co-tenant reads. Plaintext `redis://` is accepted only when `DEBUG=true`.
+
+#### Redis outage behavior (`RATE_LIMIT_FAIL_MODE`)
+
+When Redis is configured but unreachable at request time the limiter
+evaluates `RATE_LIMIT_FAIL_MODE`:
+
+* `closed` — default. The middleware returns HTTP 503
+  `rate limiter unavailable`. Safe under multi-replica deployments.
+* `open` — requests are allowed without a counter check. Operators must
+  explicitly accept the quota-bypass risk.
+* `local` — per-replica in-memory fallback. Across N replicas this
+  multiplies the effective quota by N, so `Settings` rejects it outside
+  debug mode. Intended for single-replica dev.
+
+When `REDIS_URL` is unset entirely (dev/tests), the limiter runs purely
+against in-memory buckets regardless of `RATE_LIMIT_FAIL_MODE`.
+
+Rationale for the fail-closed default comes from Cipher's review on
+precheck#31: a silent in-memory fallback on production replicas turns the
+rate limit into a denial-of-quota *ceiling* rather than a *floor*.
 
 ### PII Protection
 - Multiple redaction strategies
