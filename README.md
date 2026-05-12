@@ -1,12 +1,12 @@
-# GovernsAI Precheck
+# GovernsAI Precheck — The Enforcement Engine
 
 [![npm](https://img.shields.io/npm/v/%40governs-ai%2Fsdk?label=npm%20%40governs-ai%2Fsdk)](https://www.npmjs.com/package/@governs-ai/sdk)
 [![PyPI](https://img.shields.io/pypi/v/governs-ai-sdk?label=PyPI%20governs-ai-sdk)](https://pypi.org/project/governs-ai-sdk/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-**Fully Open Source (MIT)** - PII detection and policy evaluation service for AI applications.
+**GovernsAI is the AI governance layer where policy actually enforces.** This service is the enforcement engine: it reads the per-org policy from the dashboard, runs PII detection (Presidio + regex), applies network-scope and tool-deny rules, and returns an `allow`, `transform`, or `deny` decision on every prompt, tool call, and response — without a redeploy.
 
-This service provides real-time policy evaluation and PII detection/redaction for AI tool usage. You can use it, modify it, and even offer it as a hosted service - no restrictions.
+**Fully Open Source (MIT)** — use it, modify it, host it. No restrictions.
 
 ## Features
 
