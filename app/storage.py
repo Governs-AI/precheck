@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     Column,
     DateTime,
@@ -42,6 +43,10 @@ class APIKey(Base):
 
 
 class Policy(Base):
+    """Legacy precheck-local policy table — kept for backward compat with the
+    YAML-import flow (Phase 2.3). Org-scoped policies live in DashboardPolicy
+    below, which mirrors the dashboard's Prisma Policy model. See ADR-005."""
+
     __tablename__ = "policies"
 
     id = Column(String, primary_key=True)
@@ -49,6 +54,37 @@ class Policy(Base):
     rules = Column(Text)  # JSON string
     created_at = Column(DateTime, default=datetime.utcnow)
     is_active = Column(Boolean, default=True)
+
+
+class DashboardPolicy(Base):
+    """Read-only mirror of the dashboard's `Policy` table (Prisma model).
+
+    Precheck reads this table directly via the shared Postgres connection;
+    the dashboard owns writes. See ADR-005 (policy source of truth).
+
+    The table name is `Policy` (Prisma default — model name unchanged).
+    Column names use the Prisma @map snake_case form where applicable.
+    """
+
+    __tablename__ = "Policy"
+
+    id = Column(String, primary_key=True)
+    org_id = Column("org_id", String, nullable=False, index=True)
+    user_id = Column("user_id", String, nullable=True)
+    name = Column(String, nullable=False)
+    description = Column(String, nullable=True)
+    version = Column(String, nullable=False, default="v1")
+    defaults = Column(JSON, nullable=False)
+    tool_access = Column("tool_access", JSON, nullable=False, default=dict)
+    deny_tools = Column("deny_tools", JSON, nullable=False, default=list)
+    allow_tools = Column("allow_tools", JSON, nullable=False, default=list)
+    network_scopes = Column("network_scopes", JSON, nullable=False, default=list)
+    network_tools = Column("network_tools", JSON, nullable=False, default=list)
+    on_error = Column("on_error", String, nullable=False, default="block")
+    is_active = Column("isActive", Boolean, nullable=False, default=True)
+    priority = Column(Integer, nullable=False, default=0)
+    created_at = Column("createdAt", DateTime, default=datetime.utcnow)
+    updated_at = Column("updatedAt", DateTime, default=datetime.utcnow)
 
 
 class UsageEvent(Base):
@@ -108,8 +144,15 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
 def create_tables():
-    """Create all tables"""
-    Base.metadata.create_all(bind=engine)
+    """Create all precheck-owned tables.
+
+    `DashboardPolicy` is intentionally excluded — that table is owned and
+    migrated by the dashboard (Prisma). Precheck only reads it. See ADR-005.
+    """
+    owned_tables = [
+        t for t in Base.metadata.sorted_tables if t.name != "Policy"
+    ]
+    Base.metadata.create_all(bind=engine, tables=owned_tables)
 
 
 def get_db():
