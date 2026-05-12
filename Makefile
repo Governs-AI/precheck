@@ -1,4 +1,4 @@
-.PHONY: install install-dev test format lint type-check clean run docker-build docker-run
+.PHONY: install install-dev test load-test format lint type-check clean run docker-build docker-run
 
 # Install production dependencies
 install:
@@ -13,6 +13,15 @@ install-dev:
 # Run tests
 test:
 	pytest tests/ -v
+
+# Run the k6 load test (requires a running local service and a seeded API key)
+load-test:
+	@test -n "$(PRECHECK_API_KEY)" || (echo "PRECHECK_API_KEY is required"; exit 1)
+	mkdir -p tests/load/artifacts
+	k6 run \
+		--summary-export tests/load/artifacts/precheck-load-summary.json \
+		--out json=tests/load/artifacts/precheck-load-results.json \
+		tests/load/precheck_load.js
 
 # Format code
 format:

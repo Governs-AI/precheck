@@ -1,0 +1,86 @@
+version: v1
+description: Organization-wide policy with dual-direction tool controls, org budgets, and stricter outbound rate limits.
+defaults:
+  ingress:
+    action: redact
+  egress:
+    action: tokenize
+pii:
+  detection: presidio
+  default_action: redact
+  entity_rules:
+    "PII:email_address":
+      action: pass_through
+      description: Customer success workflows may route on raw email addresses.
+    "PII:phone_number":
+      action: tokenize
+      description: Tokenize phone numbers before external transmission.
+    "PII:us_ssn":
+      action: tokenize
+      description: SSNs are always tokenized in enterprise exports.
+    "PII:api_key":
+      action: deny
+      description: Secrets are blocked across all tools.
+tool_access:
+  verify_identity:
+    direction: both
+    action: confirm
+    allow_pii:
+      "PII:email_address": pass_through
+      "PII:phone_number": tokenize
+      "PII:us_ssn": tokenize
+  payment_processor:
+    direction: ingress
+    action: confirm
+    allow_pii:
+      "PII:email_address": pass_through
+      "PII:credit_card": tokenize
+  audit_log:
+    direction: egress
+    allow_pii:
+      "PII:email_address": pass_through
+      "PII:us_ssn": tokenize
+  security_incident_export:
+    direction: egress
+    action: confirm
+    allow_pii:
+      "PII:api_key": deny
+      "PII:jwt": deny
+budget:
+  scope: organization
+  monthly_limit_usd: 10000
+  warning_threshold_percent: 85
+  block_on_exceeded: true
+  require_context: true
+rate_limits:
+  default:
+    requests: 250
+    window_seconds: 60
+    key: organization
+  overrides:
+    payment_processor:
+      requests: 60
+      window_seconds: 60
+      key: organization
+      burst: 10
+    security_incident_export:
+      requests: 10
+      window_seconds: 300
+      key: organization
+deny_tools:
+  - python.exec
+  - bash.exec
+  - code.exec
+  - shell.exec
+  - terraform.apply
+network_scopes:
+  - net.
+  - partner.
+network_tools:
+  - web.
+  - http.
+  - fetch.
+  - request.
+  - webhook.
+on_error: best_effort
+model: gpt-4.1

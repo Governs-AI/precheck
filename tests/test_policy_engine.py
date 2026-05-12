@@ -13,7 +13,7 @@ Decision types:
 """
 
 import time
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -26,6 +26,7 @@ NOW = int(time.time())
 
 def _evaluate(tool, scope, text, direction="ingress"):
     from app.policies import evaluate
+
     return evaluate(tool, scope, text, NOW, direction)
 
 
@@ -69,7 +70,9 @@ class TestNetScopeTransform:
     @patch("app.policies.USE_PRESIDIO", False)
     @patch("app.policies.ANALYZER", None)
     def test_net_scope_email_redacted(self):
-        result = _evaluate("model.chat", "net.external", "Email me at alice@example.com")
+        result = _evaluate(
+            "model.chat", "net.external", "Email me at alice@example.com"
+        )
         assert result["decision"] in {"transform", "allow"}
         if result["decision"] == "transform":
             assert result.get("raw_text_out") is not None
@@ -116,6 +119,7 @@ class TestAllowDecision:
     def test_safe_tool_in_deny_list_is_still_safe(self):
         # "file.read" is NOT in DENY_TOOLS
         from app.policies import DENY_TOOLS
+
         assert "file.read" not in DENY_TOOLS
         assert "model.chat" not in DENY_TOOLS
 

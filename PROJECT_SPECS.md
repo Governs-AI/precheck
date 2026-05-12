@@ -32,6 +32,7 @@ GovernsAI Precheck is a policy evaluation and PII redaction service that provide
 - **Dead Letter Queue (DLQ)**: Failed webhook deliveries stored in JSONL format
 - **Retry logic**: Exponential backoff with configurable retry attempts
 - **Event schema**: Versioned event format for backward compatibility
+- **Allow-decision cache**: Redis-first cache for identical `allow` decisions with a short TTL
 
 ### 5. Failure Contract & Error Handling
 - **Configurable error behavior**: `block`, `pass`, or `best_effort` modes
@@ -190,6 +191,11 @@ GET /api/metrics
 **Purpose**: Prometheus metrics endpoint for monitoring and alerting
 
 **Response**: Prometheus text format with counters, histograms, and gauges
+
+### Standard Response Headers
+- **`X-Request-ID`**: Unique UUID generated for each request for trace correlation
+- **`X-Response-Time-Ms`**: Integer request duration in milliseconds added to every response
+- **`X-Cache`**: Cache outcome for `/api/v1/precheck` responses (`HIT` or `MISS`)
 
 ### Precheck Endpoint
 ```
@@ -462,6 +468,74 @@ ws://172.16.10.59:3002/api/ws/gateway?key=gai_827eode3nxa&org=dfy&channels=org:c
 
 ## Policy Configuration
 
+### Canonical Policy-As-Code Schema
+
+Policy-as-code files are validated against the canonical JSON Schema at
+`schemas/policy.schema.json`. The existing `policy.tool_access.yaml` fallback
+file remains supported, and the canonical contract extends that legacy shape
+with explicit sections for PII, budgets, and rate limits so YAML round-trip
+import/export can converge on a single format.
+
+Reference files:
+- `schemas/policy.schema.json`
+- `examples/policies/minimal.yaml`
+- `examples/policies/standard.yaml`
+- `examples/policies/enterprise.yaml`
+
+```yaml
+version: v1
+defaults:
+  ingress:
+    action: redact
+  egress:
+    action: redact
+
+pii:
+  detection: auto
+  default_action: redact
+  entity_rules:
+    "PII:api_key":
+      action: deny
+    "PII:us_ssn":
+      action: tokenize
+
+tool_access:
+  verify_identity:
+    direction: ingress
+    action: confirm
+    allow_pii:
+      "PII:email_address": pass_through
+      "PII:us_ssn": tokenize
+
+budget:
+  scope: user
+  monthly_limit_usd: 500
+  warning_threshold_percent: 90
+  block_on_exceeded: true
+  require_context: true
+
+rate_limits:
+  default:
+    requests: 100
+    window_seconds: 60
+    key: user
+
+deny_tools:
+  - python.exec
+  - bash.exec
+  - code.exec
+  - shell.exec
+network_scopes:
+  - net.
+network_tools:
+  - web.
+  - http.
+  - fetch.
+  - request.
+on_error: block
+model: gpt-4
+```
+
 ### Tool Access Policy (`policy.tool_access.yaml`)
 
 ```yaml
@@ -501,6 +575,7 @@ tool_access:
 - **`tokenize`**: Replace PII with stable token (e.g., `pii_8797942a`)
 - **`redact`**: Apply standard redaction (e.g., `<USER_EMAIL>`, `<USER_SSN>`)
 - **`deny`**: Block the request entirely
+- **`confirm`**: Require an approval/confirmation step before tool execution
 
 ### Global Defaults
 
@@ -668,6 +743,12 @@ graph TD
     H --> J
     I --> J
 ```
+
+### Planned Sidecar Gateway (Mode 2)
+
+- Design artifact: `docs/design/sidecar-mode.md`
+- Scope: OpenAI-compatible sidecar that intercepts `POST /v1/chat/completions`, runs `precheck` before forwarding, and supports configurable `fail_open` or `fail_closed` behavior
+- Status: Design completed in GOV-563; implementation follows in task 2.1b
 
 ## Budget Management
 
@@ -838,10 +919,12 @@ Budget limits can be configured per user:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `PII_TOKEN_SALT` | Salt for token generation | `default-salt-change-in-production` |
+| `DB_URL` / `DATABASE_URL` | Database connection URL | `sqlite:///./local.db` |
+| `PII_TOKEN_SALT` | Salt for token generation | `dev-pii-token-salt-change-in-production` |
 | `PRECHECK_DLQ` | Dead letter queue path | `/tmp/precheck.dlq.jsonl` |
 | `WEBHOOK_URL` | Webhook URL for events | None |
-| `WEBHOOK_SECRET` | Secret for HMAC signing | `dev-secret` |
+| `WEBHOOK_SECRET` | Secret for HMAC signing | `dev-webhook-secret-change-in-production` |
+| `KEY_HMAC_SECRET` | Secret for API key hashing | `dev-key-hmac-secret-change-in-production` |
 | `WEBHOOK_TIMEOUT_S` | Webhook request timeout | `2.5` |
 | `WEBHOOK_MAX_RETRIES` | Maximum retry attempts | `3` |
 | `WEBHOOK_BACKOFF_BASE_MS` | Base backoff delay in ms | `150` |
@@ -865,9 +948,56 @@ Budget limits can be configured per user:
 - API key extracted from `X-Governs-Key` header and forwarded to webhook events
 
 ### Rate Limiting
-- 100 requests per minute per user
-- Configurable limits and windows
-- Redis-based rate limiting (optional)
+
+Minute-bucket sliding-window counters, enforced by the
+`app.rate_limit_middleware` FastAPI middleware before any route handler runs.
+Four dimensions are evaluated per authenticated request:
+
+| Counter key                        | Default limit        |
+|------------------------------------|----------------------|
+| `req:key:{key_hash}:{minute}`      | 100 req/min          |
+| `tokens:key:{key_hash}:{minute}`   | 100,000 tokens/min   |
+| `req:org:{org_id}:{minute}`        | 1,000 req/min        |
+| `tokens:org:{org_id}:{minute}`     | 1,000,000 tokens/min |
+
+Token cost is estimated from the request `Content-Length` as `ceil(bytes / 4)`
+(standard rough heuristic) until §1.5d wires policy-driven limits and real
+tokenizer counts.
+
+All responses carry `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and
+`X-RateLimit-Reset` reflecting the most restrictive dimension. Denied
+requests return HTTP 429 with a `Retry-After` header in seconds.
+
+Unauthenticated paths (`/api/v1/health`, `/api/v1/ready`, `/api/metrics`,
+`/docs`, `/redoc`, `/openapi.json`, `/`) skip the limiter so probes cannot
+consume quota.
+
+#### Redis posture
+
+`REDIS_URL` **must** use the `rediss://` TLS scheme and carry a password in
+any non-debug environment. The `Settings` validator rejects plaintext or
+passwordless URLs — this protects counters against on-path tampering and
+co-tenant reads. Plaintext `redis://` is accepted only when `DEBUG=true`.
+
+#### Redis outage behavior (`RATE_LIMIT_FAIL_MODE`)
+
+When Redis is configured but unreachable at request time the limiter
+evaluates `RATE_LIMIT_FAIL_MODE`:
+
+* `closed` — default. The middleware returns HTTP 503
+  `rate limiter unavailable`. Safe under multi-replica deployments.
+* `open` — requests are allowed without a counter check. Operators must
+  explicitly accept the quota-bypass risk.
+* `local` — per-replica in-memory fallback. Across N replicas this
+  multiplies the effective quota by N, so `Settings` rejects it outside
+  debug mode. Intended for single-replica dev.
+
+When `REDIS_URL` is unset entirely (dev/tests), the limiter runs purely
+against in-memory buckets regardless of `RATE_LIMIT_FAIL_MODE`.
+
+Rationale for the fail-closed default comes from Cipher's review on
+precheck#31: a silent in-memory fallback on production replicas turns the
+rate limit into a denial-of-quota *ceiling* rather than a *floor*.
 
 ### PII Protection
 - Multiple redaction strategies
@@ -1041,6 +1171,11 @@ curl -X POST http://localhost:8080/api/v1/postcheck \
 ```
 
 ## Recent Changes Log
+- **2026-04-23**: Added the Mode 2 sidecar / proxy gateway design document at `docs/design/sidecar-mode.md`
+  - **Language Decision**: Recommends Go for the proxy hot path over Node.js and Python
+  - **Interception Model**: Defines `POST /v1/chat/completions` interception with `precheck` before upstream forwarding
+  - **Compatibility Contract**: Documents OpenAI drop-in behavior via `OPENAI_BASE_URL` override
+  - **Failure Handling**: Defines configurable `fail_open` and `fail_closed` behavior when `precheck` is unavailable
 - **2025-01-14**: **API Route Updates**: Simplified API routes and improved user_id handling
   - **Route Changes**: Added `/api` prefix to all routes (`/api/v1/precheck`, `/api/v1/postcheck`, etc.)
   - **User ID Handling**: Made `user_id` optional in request payload, with fallback extraction from webhook URL

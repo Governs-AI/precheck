@@ -1,0 +1,24 @@
+version: v1
+description: Minimal baseline policy with safe defaults and network redaction.
+defaults:
+  ingress:
+    action: redact
+  egress:
+    action: redact
+pii:
+  detection: auto
+  default_action: redact
+deny_tools:
+  - python.exec
+  - bash.exec
+  - code.exec
+  - shell.exec
+network_scopes:
+  - net.
+network_tools:
+  - web.
+  - http.
+  - fetch.
+  - request.
+on_error: block
+model: gpt-4o-mini

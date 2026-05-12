@@ -14,7 +14,6 @@ Also covers the improved token estimator (_estimate_tokens / estimate_request_co
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -40,6 +39,7 @@ def _make_context(
 
 def _check(context, estimated_llm_cost, estimated_purchase=None):
     from app.budget import check_budget_with_context
+
     return check_budget_with_context(context, estimated_llm_cost, estimated_purchase)
 
 
@@ -153,20 +153,24 @@ class TestNoBudget:
 class TestTokenEstimation:
     def test_estimate_tokens_non_zero(self):
         from app.budget import _estimate_tokens
+
         assert _estimate_tokens("Hello world") >= 1
 
     def test_estimate_tokens_empty_string_returns_one(self):
         from app.budget import _estimate_tokens
+
         assert _estimate_tokens("") == 1
 
     def test_estimate_tokens_word_based_wins_for_short_words(self):
         from app.budget import _estimate_tokens
+
         # "I am a cat" — 4 words × 1.3 = 5.2; char-based: 10//4 = 2 → word wins
         result = _estimate_tokens("I am a cat")
         assert result >= 5
 
     def test_estimate_tokens_char_based_wins_for_dense_text(self):
         from app.budget import _estimate_tokens
+
         # Dense text: single 400-char word (no spaces)
         long_token = "a" * 400
         result = _estimate_tokens(long_token)
@@ -175,11 +179,13 @@ class TestTokenEstimation:
 
     def test_estimate_request_cost_positive(self):
         from app.budget import estimate_request_cost
+
         cost = estimate_request_cost("Send this message to the LLM for processing.")
         assert cost > 0.0
 
     def test_estimate_request_cost_scales_with_length(self):
         from app.budget import estimate_request_cost
+
         short_cost = estimate_request_cost("Hi")
         long_cost = estimate_request_cost("Hi " * 200)
         assert long_cost > short_cost

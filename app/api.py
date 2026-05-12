@@ -1,27 +1,34 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Response, Depends
-from sqlalchemy.orm import Session
-from .models import PrePostCheckRequest, DecisionResponse
-from .policies import evaluate, evaluate_with_payload_policy
-from .rate_limit import rate_limiter
-from .events import emit_event, get_webhook_config
-from .log import audit_log
-from .metrics import (
-    get_metrics, get_metrics_content_type, set_service_info,
-    record_precheck_request, record_postcheck_request, record_policy_evaluation,
-    record_request_error, set_active_requests
-)
-from .settings import settings
-from .auth import require_api_key
-from .storage import get_db, APIKey
-import logging
-import time
 import asyncio
 import hashlib
 import json
-import secrets
+import logging
 import os
+import secrets
+import time
 from datetime import datetime
-from typing import List, Tuple, Optional
+from typing import List, Optional, Tuple
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
+from sqlalchemy.orm import Session
+
+from .auth import AuthContext, require_api_key
+from .decision_cache import allow_decision_cache
+from .events import emit_event
+from .log import audit_log
+from .metrics import (
+    get_metrics,
+    get_metrics_content_type,
+    record_policy_evaluation,
+    record_postcheck_request,
+    record_precheck_request,
+    record_request_error,
+    set_active_requests,
+    set_service_info,
+)
+from .models import DecisionResponse, PrePostCheckRequest
+from .policies import evaluate, evaluate_with_payload_policy
+from .settings import settings
+from .storage import APIKey, get_db
 
 logger = logging.getLogger(__name__)
 
@@ -33,14 +40,38 @@ def _ensure_correlation_id(corr_id: Optional[str]) -> str:
     return corr_id or f"corr-{secrets.token_hex(12)}"
 
 
-def extract_pii_info_from_reasons(reasons: Optional[List[str]]) -> Tuple[List[str], float]:
+def _build_allow_cache_key(req: PrePostCheckRequest, org_id: Optional[str]) -> str:
+    policy_version = req.policy_config.version if req.policy_config else "legacy"
+    payload = {
+        "content": req.raw_text,
+        "tool": req.tool,
+        "policy_version": policy_version,
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"precheck:allow:{org_id or 'no-org'}:{digest}"
+
+
+def _is_cacheable_allow_result(req: PrePostCheckRequest, result: dict) -> bool:
+    return (
+        req.budget_context is None
+        and result.get("decision") == "allow"
+        and result.get("budget_status") is None
+        and result.get("budget_info") is None
+    )
+
+
+def extract_pii_info_from_reasons(
+    reasons: Optional[List[str]],
+) -> Tuple[List[str], float]:
     """Extract PII types and calculate confidence from reason codes"""
     pii_types = []
     confidence_scores = []
-    
+
     if not reasons:
         return pii_types, 0.95  # Default confidence when no reasons
-    
+
     for reason in reasons:
         if reason.startswith("pii."):
             # Extract PII type from reason codes like "pii.redacted:PII:email_address"
@@ -48,7 +79,7 @@ def extract_pii_info_from_reasons(reasons: Optional[List[str]]) -> Tuple[List[st
             if len(parts) >= 3:
                 pii_type = parts[2]  # e.g., "email_address"
                 pii_types.append(pii_type)
-                
+
                 # Assign confidence based on action type
                 action = parts[1]  # e.g., "redacted", "allowed", "tokenized"
                 if action == "allowed":
@@ -59,26 +90,35 @@ def extract_pii_info_from_reasons(reasons: Optional[List[str]]) -> Tuple[List[st
                     confidence_scores.append(0.7)  # Medium confidence for redacted
                 else:
                     confidence_scores.append(0.5)  # Default confidence
-    
+
     # Calculate average confidence, default to 0.95 if no PII detected
-    avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0.95
-    
+    avg_confidence = (
+        sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0.95
+    )
+
     return pii_types, avg_confidence
+
 
 @router.post("/v1/keys/rotate")
 async def rotate_api_key(
-    api_key: str = Depends(require_api_key),
+    auth: AuthContext = Depends(require_api_key),
     db: Session = Depends(get_db),
 ):
     """Rotate the authenticated API key: create a new key and deactivate the old one."""
-    record = db.query(APIKey).filter(APIKey.key == api_key).first()
+    from .key_utils import generate_api_key, hash_api_key
+
+    record = (
+        db.query(APIKey).filter(APIKey.key_hash == hash_api_key(auth.raw_key)).first()
+    )
     if not record:
         raise HTTPException(status_code=404, detail="key not found")
 
-    new_key_value = "GAI_" + secrets.token_urlsafe(32)
+    new_raw_key, new_key_hash, new_key_prefix = generate_api_key()
     new_record = APIKey(
-        key=new_key_value,
+        key_hash=new_key_hash,
+        key_prefix=new_key_prefix,
         user_id=record.user_id,
+        org_id=record.org_id,
         is_active=True,
         expires_at=record.expires_at,
     )
@@ -86,16 +126,20 @@ async def rotate_api_key(
     record.is_active = False
     db.commit()
 
-    return {"key": new_key_value, "user_id": record.user_id}
+    return {"key": new_raw_key, "user_id": record.user_id, "org_id": record.org_id}
 
 
 @router.post("/v1/keys/revoke")
 async def revoke_api_key(
-    api_key: str = Depends(require_api_key),
+    auth: AuthContext = Depends(require_api_key),
     db: Session = Depends(get_db),
 ):
     """Revoke the authenticated API key (deactivates it immediately)."""
-    record = db.query(APIKey).filter(APIKey.key == api_key).first()
+    from .key_utils import hash_api_key
+
+    record = (
+        db.query(APIKey).filter(APIKey.key_hash == hash_api_key(auth.raw_key)).first()
+    )
     if not record:
         raise HTTPException(status_code=404, detail="key not found")
 
@@ -108,61 +152,87 @@ async def revoke_api_key(
 @router.get("/v1/health")
 async def health():
     """Health check endpoint"""
-    return {
-        "ok": True,
-        "service": "governsai-precheck",
-        "version": "0.1.0"
-    }
+    return {"ok": True, "service": "governsai-precheck", "version": "0.1.0"}
+
 
 @router.get("/v1/ready")
 async def ready():
     """
     Readiness check endpoint
-    
+
     Performs comprehensive checks to ensure the service is ready to handle requests:
     - Presidio analyzer and anonymizer initialization
     - Policy file parsing and validation
     - Core dependencies availability
     """
+    import os
+
     from .policies import ANALYZER, ANONYMIZER, USE_PRESIDIO, get_policy
     from .settings import settings
-    import os
-    
+
     checks = {}
     overall_ready = True
-    
+
     # Check Presidio initialization
     if USE_PRESIDIO:
         if ANALYZER is not None and ANONYMIZER is not None:
-            checks["presidio"] = {"status": "ok", "message": "Presidio analyzer and anonymizer initialized"}
+            checks["presidio"] = {
+                "status": "ok",
+                "message": "Presidio analyzer and anonymizer initialized",
+            }
         else:
-            checks["presidio"] = {"status": "error", "message": "Presidio failed to initialize"}
+            checks["presidio"] = {
+                "status": "error",
+                "message": "Presidio failed to initialize",
+            }
             overall_ready = False
     else:
-        checks["presidio"] = {"status": "disabled", "message": "Presidio disabled, using regex fallback"}
-    
+        checks["presidio"] = {
+            "status": "disabled",
+            "message": "Presidio disabled, using regex fallback",
+        }
+
     # Check policy file parsing
     try:
         policy = get_policy()
-        if policy and ("version" in policy or "tool_access" in policy or "defaults" in policy):
-            checks["policy"] = {"status": "ok", "message": f"Policy loaded with {len(policy)} sections"}
+        if policy and (
+            "version" in policy or "tool_access" in policy or "defaults" in policy
+        ):
+            checks["policy"] = {
+                "status": "ok",
+                "message": f"Policy loaded with {len(policy)} sections",
+            }
         else:
-            checks["policy"] = {"status": "warning", "message": "Policy loaded but appears empty"}
+            checks["policy"] = {
+                "status": "warning",
+                "message": "Policy loaded but appears empty",
+            }
     except Exception as e:
-        checks["policy"] = {"status": "error", "message": f"Policy parsing failed: {str(e)}"}
+        checks["policy"] = {
+            "status": "error",
+            "message": f"Policy parsing failed: {str(e)}",
+        }
         overall_ready = False
-    
+
     # Check policy file exists
-    policy_file = getattr(settings, 'policy_file', 'policy.tool_access.yaml')
+    policy_file = getattr(settings, "policy_file", "policy.tool_access.yaml")
     if not os.path.exists(policy_file):
-        policy_file = os.path.join(os.path.dirname(__file__), "..", "policy.tool_access.yaml")
-    
+        policy_file = os.path.join(
+            os.path.dirname(__file__), "..", "policy.tool_access.yaml"
+        )
+
     if os.path.exists(policy_file):
-        checks["policy_file"] = {"status": "ok", "message": f"Policy file exists: {policy_file}"}
+        checks["policy_file"] = {
+            "status": "ok",
+            "message": f"Policy file exists: {policy_file}",
+        }
     else:
-        checks["policy_file"] = {"status": "error", "message": f"Policy file not found: {policy_file}"}
+        checks["policy_file"] = {
+            "status": "error",
+            "message": f"Policy file not found: {policy_file}",
+        }
         overall_ready = False
-    
+
     # Check critical environment variables
     env_checks = {}
     critical_env_vars = ["PII_TOKEN_SALT", "ON_ERROR"]
@@ -172,35 +242,39 @@ async def ready():
         else:
             env_checks[var] = "missing"
             overall_ready = False
-    
+
     checks["environment"] = {
         "status": "ok" if all(v == "ok" for v in env_checks.values()) else "error",
-        "message": f"Environment variables: {env_checks}"
+        "message": f"Environment variables: {env_checks}",
     }
-    
+
     # Check DLQ directory accessibility
     try:
         dlq_path = settings.precheck_dlq
         dlq_dir = os.path.dirname(dlq_path)
         os.makedirs(dlq_dir, exist_ok=True)
-        checks["dlq"] = {"status": "ok", "message": f"DLQ directory accessible: {dlq_dir}"}
+        checks["dlq"] = {
+            "status": "ok",
+            "message": f"DLQ directory accessible: {dlq_dir}",
+        }
     except Exception as e:
         checks["dlq"] = {"status": "error", "message": f"DLQ directory error: {str(e)}"}
         overall_ready = False
-    
+
     return {
         "ready": overall_ready,
         "service": "governsai-precheck",
         "version": "0.1.0",
         "checks": checks,
-        "timestamp": int(time.time())
+        "timestamp": int(time.time()),
     }
+
 
 @router.get("/metrics")
 async def metrics():
     """
     Prometheus metrics endpoint
-    
+
     Returns metrics in Prometheus text format for monitoring and alerting.
     Includes counters, histograms, and gauges for request tracking, performance
     monitoring, and system health.
@@ -209,89 +283,110 @@ async def metrics():
     set_service_info(
         version="0.1.0",
         build_date=os.getenv("BUILD_DATE", "unknown"),
-        git_commit=os.getenv("GIT_COMMIT", "unknown")
+        git_commit=os.getenv("GIT_COMMIT", "unknown"),
     )
-    
+
     metrics_data = get_metrics()
-    return Response(
-        content=metrics_data,
-        media_type=get_metrics_content_type()
-    )
+    return Response(content=metrics_data, media_type=get_metrics_content_type())
+
 
 @router.post("/v1/precheck", response_model=DecisionResponse)
 async def precheck(
     req: PrePostCheckRequest,
-    api_key: str = Depends(require_api_key)
+    response: Response,
+    auth: AuthContext = Depends(require_api_key),
 ):
     """Precheck endpoint for policy evaluation and PII redaction"""
+    api_key = auth.raw_key
+    org_id = auth.org_id
     # User ID is optional - websocket will resolve from API key if needed
     user_id = req.user_id
     correlation_id = _ensure_correlation_id(req.corr_id)
 
-    # Rate limiting (100 requests per minute per user/api_key)
-    if user_id:
-        rate_limit_key = f"precheck:{user_id}"
-    else:
-        rate_limit_key = f"precheck:key:{api_key}"
-    if not rate_limiter.is_allowed(rate_limit_key, limit=100, window=60):
-        raise HTTPException(status_code=429, detail="rate limit exceeded")
-    
+    # Rate limiting is enforced by app.rate_limit_middleware before this
+    # handler runs — see app/rate_limit_middleware.py.
+
     # Metrics: Track active requests
     set_active_requests("precheck", 1)
-    
+
     start_time = time.time()
     start_ts = int(start_time)
-    
-    try:
-        logger.debug("precheck request", extra={"tool": req.tool, "corr_id": correlation_id})
+    cache_key = _build_allow_cache_key(req, org_id)
 
-        # Use new policy evaluation with payload policies
-        policy_config = req.policy_config.model_dump() if req.policy_config else None
-        tool_config = req.tool_config.model_dump() if req.tool_config else None
-        budget_context = req.budget_context.model_dump() if req.budget_context else None
-        result = evaluate_with_payload_policy(
-            tool=req.tool,
-            scope=req.scope,
-            raw_text=req.raw_text,
-            now=start_ts,
-            direction="ingress",
-            policy_config=policy_config,
-            tool_config=tool_config,
-            user_id=user_id,
-            budget_context=budget_context
+    try:
+        logger.debug(
+            "precheck request", extra={"tool": req.tool, "corr_id": correlation_id}
         )
-        
-        # Add budget info to result if not already present
-        if user_id and tool_config and policy_config and budget_context:
-            from .policies import _add_budget_info_to_result
-            result = _add_budget_info_to_result(result, user_id, req.tool, req.raw_text, tool_config, policy_config, budget_context)
-        
-        # Metrics: Record policy evaluation
-        policy_eval_duration = time.time() - start_time
-        record_policy_evaluation(
-            tool=req.tool,
-            direction="ingress",
-            policy_id=result.get("policy_id", "unknown"),
-            duration=policy_eval_duration
-        )
-        
+
+        cached_result = allow_decision_cache.get(cache_key)
+        if cached_result is not None:
+            response.headers["X-Cache"] = "HIT"
+            result = cached_result
+        else:
+            response.headers["X-Cache"] = "MISS"
+
+            # Use new policy evaluation with payload policies
+            policy_config = (
+                req.policy_config.model_dump() if req.policy_config else None
+            )
+            tool_config = req.tool_config.model_dump() if req.tool_config else None
+            budget_context = (
+                req.budget_context.model_dump() if req.budget_context else None
+            )
+            result = evaluate_with_payload_policy(
+                tool=req.tool,
+                scope=req.scope,
+                raw_text=req.raw_text,
+                now=start_ts,
+                direction="ingress",
+                policy_config=policy_config,
+                tool_config=tool_config,
+                user_id=user_id,
+                budget_context=budget_context,
+            )
+
+            # Add budget info to result if not already present
+            if user_id and tool_config and policy_config and budget_context:
+                from .policies import _add_budget_info_to_result
+
+                result = _add_budget_info_to_result(
+                    result,
+                    user_id,
+                    req.tool,
+                    req.raw_text,
+                    tool_config,
+                    policy_config,
+                    budget_context,
+                )
+
+            if _is_cacheable_allow_result(req, result):
+                allow_decision_cache.set(cache_key, result)
+
+            # Metrics: Record policy evaluation
+            policy_eval_duration = time.time() - start_time
+            record_policy_evaluation(
+                tool=req.tool,
+                direction="ingress",
+                policy_id=result.get("policy_id", "unknown"),
+                duration=policy_eval_duration,
+            )
+
         # Extract PII information from reasons
         pii_types, confidence = extract_pii_info_from_reasons(result.get("reasons", []))
-        
-        # Get webhook configuration from URL (fallback if no API key from header/env)
-        webhook_org_id, webhook_channel, webhook_api_key = get_webhook_config()
-        
-        # Use API key from request if available, otherwise fall back to webhook API key
-        final_api_key = api_key or webhook_api_key or ""
-        
+
+        # Per-org routing: org_id comes from the authenticated key record (DL-1).
+        # The decisions channel is derived from that org_id, never from a global env var.
+        decisions_channel = f"org:{org_id}:decisions" if org_id else None
+        final_api_key = api_key or ""
+
         # Build event (always send, even if orgId or channel are None)
         event = {
             "type": "INGEST",
-            "channel": webhook_channel,
+            "channel": decisions_channel,
             "schema": "decision.v1",
             "idempotencyKey": f"precheck-{start_ts}-{correlation_id}",
             "data": {
-                "orgId": webhook_org_id,
+                "orgId": org_id,
                 "direction": "precheck",
                 "decision": result["decision"],
                 "tool": req.tool,
@@ -302,7 +397,7 @@ async def precheck(
                 "detectorSummary": {
                     "reasons": result.get("reasons", []),
                     "confidence": confidence,
-                    "piiDetected": pii_types
+                    "piiDetected": pii_types,
                 },
                 "payloadHash": f"sha256:{hashlib.sha256(req.raw_text.encode()).hexdigest()}",
                 "latencyMs": int((time.time() - start_time) * 1000),
@@ -311,27 +406,35 @@ async def precheck(
                 "ts": f"{datetime.fromtimestamp(start_ts).isoformat()}Z",
                 "authentication": {
                     "userId": user_id,
-                    "apiKeyId": hashlib.sha256(final_api_key.encode()).hexdigest()[:16] if final_api_key else None,
-                }
-            }
+                    "apiKeyId": (
+                        hashlib.sha256(final_api_key.encode()).hexdigest()[:16]
+                        if final_api_key
+                        else None
+                    ),
+                },
+            },
         }
-        
+
         # Fire and forget (don't block response path)
         try:
-            asyncio.create_task(emit_event(event, correlation_id=correlation_id))
+            asyncio.create_task(
+                emit_event(event, org_id=org_id, correlation_id=correlation_id)
+            )
         except RuntimeError:
             # If no running loop (tests), do it inline once
-            await emit_event(event, correlation_id=correlation_id)
-        
+            await emit_event(event, org_id=org_id, correlation_id=correlation_id)
+
         # Audit log before response
-        audit_log("precheck", 
-                  user_id=user_id, 
-                  tool=req.tool, 
-                  decision=result["decision"], 
-                  corr_id=correlation_id,
-                  policy_id=result.get("policy_id"),
-                  reasons=result.get("reasons", []))
-        
+        audit_log(
+            "precheck",
+            user_id=user_id,
+            tool=req.tool,
+            decision=result["decision"],
+            corr_id=correlation_id,
+            policy_id=result.get("policy_id"),
+            reasons=result.get("reasons", []),
+        )
+
         # Metrics: Record precheck request
         total_duration = time.time() - start_time
         record_precheck_request(
@@ -339,46 +442,45 @@ async def precheck(
             tool=req.tool,
             decision=result["decision"],
             policy_id=result.get("policy_id", "unknown"),
-            duration=total_duration
+            duration=total_duration,
         )
-        
+
         return DecisionResponse(**result)
-    
+
     except Exception as e:
         record_request_error("precheck", type(e).__name__)
         # Re-raise the exception after clearing metrics
         raise e
-    
+
     finally:
         # Metrics: Clear active requests
         set_active_requests("precheck", 0)
 
+
 @router.post("/v1/postcheck", response_model=DecisionResponse)
 async def postcheck(
-    req: PrePostCheckRequest,
-    api_key: str = Depends(require_api_key)
+    req: PrePostCheckRequest, auth: AuthContext = Depends(require_api_key)
 ):
     """Postcheck endpoint for post-execution validation"""
+    api_key = auth.raw_key
+    org_id = auth.org_id
     # User ID is optional - websocket will resolve from API key if needed
     user_id = req.user_id
     correlation_id = _ensure_correlation_id(req.corr_id)
 
-    # Rate limiting (100 requests per minute per user/api_key)
-    if user_id:
-        rate_limit_key = f"postcheck:{user_id}"
-    else:
-        rate_limit_key = f"postcheck:key:{api_key}"
-    if not rate_limiter.is_allowed(rate_limit_key, limit=100, window=60):
-        raise HTTPException(status_code=429, detail="rate limit exceeded")
-    
+    # Rate limiting is enforced by app.rate_limit_middleware before this
+    # handler runs — see app/rate_limit_middleware.py.
+
     # Metrics: Track active requests
     set_active_requests("postcheck", 1)
-    
+
     start_time = time.time()
     start_ts = int(start_time)
-    
+
     try:
-        logger.debug("postcheck request", extra={"tool": req.tool, "corr_id": correlation_id})
+        logger.debug(
+            "postcheck request", extra={"tool": req.tool, "corr_id": correlation_id}
+        )
 
         # Use new policy evaluation with payload policies
         policy_config = req.policy_config.model_dump() if req.policy_config else None
@@ -393,40 +495,47 @@ async def postcheck(
             policy_config=policy_config,
             tool_config=tool_config,
             user_id=user_id,
-            budget_context=budget_context
+            budget_context=budget_context,
         )
-        
+
         # Add budget info to result if not already present
         if user_id and tool_config and policy_config and budget_context:
             from .policies import _add_budget_info_to_result
-            result = _add_budget_info_to_result(result, user_id, req.tool, req.raw_text, tool_config, policy_config, budget_context)
-        
+
+            result = _add_budget_info_to_result(
+                result,
+                user_id,
+                req.tool,
+                req.raw_text,
+                tool_config,
+                policy_config,
+                budget_context,
+            )
+
         # Metrics: Record policy evaluation
         policy_eval_duration = time.time() - start_time
         record_policy_evaluation(
             tool=req.tool,
             direction="egress",
             policy_id=result.get("policy_id", "unknown"),
-            duration=policy_eval_duration
+            duration=policy_eval_duration,
         )
-        
+
         # Extract PII information from reasons
         pii_types, confidence = extract_pii_info_from_reasons(result.get("reasons", []))
-        
-        # Get webhook configuration from URL (fallback if no API key from header/env)
-        webhook_org_id, webhook_channel, webhook_api_key = get_webhook_config()
-        
-        # Use API key from request if available, otherwise fall back to webhook API key
-        final_api_key = api_key or webhook_api_key or ""
-        
+
+        # Per-org routing: org_id comes from the authenticated key record (DL-1).
+        decisions_channel = f"org:{org_id}:decisions" if org_id else None
+        final_api_key = api_key or ""
+
         # Build event (always send, even if orgId or channel are None)
         event = {
             "type": "INGEST",
-            "channel": webhook_channel,
+            "channel": decisions_channel,
             "schema": "decision.v1",
             "idempotencyKey": f"postcheck-{start_ts}-{correlation_id}",
             "data": {
-                "orgId": webhook_org_id,
+                "orgId": org_id,
                 "direction": "postcheck",
                 "decision": result["decision"],
                 "tool": req.tool,
@@ -437,7 +546,7 @@ async def postcheck(
                 "detectorSummary": {
                     "reasons": result.get("reasons", []),
                     "confidence": confidence,
-                    "piiDetected": pii_types
+                    "piiDetected": pii_types,
                 },
                 "payloadHash": f"sha256:{hashlib.sha256(req.raw_text.encode()).hexdigest()}",
                 "latencyMs": int((time.time() - start_time) * 1000),
@@ -446,27 +555,35 @@ async def postcheck(
                 "ts": f"{datetime.fromtimestamp(start_ts).isoformat()}Z",
                 "authentication": {
                     "userId": user_id,
-                    "apiKeyId": hashlib.sha256(final_api_key.encode()).hexdigest()[:16] if final_api_key else None,
-                }
-            }
+                    "apiKeyId": (
+                        hashlib.sha256(final_api_key.encode()).hexdigest()[:16]
+                        if final_api_key
+                        else None
+                    ),
+                },
+            },
         }
-        
+
         # Fire and forget (don't block response path)
         try:
-            asyncio.create_task(emit_event(event, correlation_id=correlation_id))
+            asyncio.create_task(
+                emit_event(event, org_id=org_id, correlation_id=correlation_id)
+            )
         except RuntimeError:
             # If no running loop (tests), do it inline once
-            await emit_event(event, correlation_id=correlation_id)
-        
+            await emit_event(event, org_id=org_id, correlation_id=correlation_id)
+
         # Audit log before response
-        audit_log("postcheck", 
-                  user_id=user_id, 
-                  tool=req.tool, 
-                  decision=result["decision"], 
-                  corr_id=correlation_id,
-                  policy_id=result.get("policy_id"),
-                  reasons=result.get("reasons", []))
-        
+        audit_log(
+            "postcheck",
+            user_id=user_id,
+            tool=req.tool,
+            decision=result["decision"],
+            corr_id=correlation_id,
+            policy_id=result.get("policy_id"),
+            reasons=result.get("reasons", []),
+        )
+
         # Metrics: Record postcheck request
         total_duration = time.time() - start_time
         record_postcheck_request(
@@ -474,16 +591,16 @@ async def postcheck(
             tool=req.tool,
             decision=result["decision"],
             policy_id=result.get("policy_id", "unknown"),
-            duration=total_duration
+            duration=total_duration,
         )
-        
+
         return DecisionResponse(**result)
-    
+
     except Exception as e:
         record_request_error("postcheck", type(e).__name__)
         # Re-raise the exception after clearing metrics
         raise e
-    
+
     finally:
         # Metrics: Clear active requests
         set_active_requests("postcheck", 0)

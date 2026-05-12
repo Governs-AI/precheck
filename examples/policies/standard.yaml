@@ -1,0 +1,66 @@
+version: v1
+description: Team-level policy with reusable PII rules, per-tool overrides, budget caps, and user rate limits.
+defaults:
+  ingress:
+    action: redact
+  egress:
+    action: redact
+pii:
+  detection: auto
+  default_action: redact
+  entity_rules:
+    "PII:email_address":
+      action: pass_through
+      description: Allow verified communication tools to receive raw email addresses.
+    "PII:us_ssn":
+      action: tokenize
+      description: Tokenize SSNs before they leave the service boundary.
+    "PII:api_key":
+      action: deny
+      description: Never expose secrets to downstream tools.
+tool_access:
+  verify_identity:
+    direction: ingress
+    action: confirm
+    allow_pii:
+      "PII:email_address": pass_through
+      "PII:us_ssn": tokenize
+  send_marketing_email:
+    direction: ingress
+    allow_pii:
+      "PII:email_address": pass_through
+  data_export:
+    direction: egress
+    allow_pii:
+      "PII:email_address": pass_through
+      "PII:us_ssn": tokenize
+budget:
+  scope: user
+  monthly_limit_usd: 500
+  warning_threshold_percent: 90
+  block_on_exceeded: true
+  require_context: true
+rate_limits:
+  default:
+    requests: 100
+    window_seconds: 60
+    key: user
+  overrides:
+    send_marketing_email:
+      requests: 20
+      window_seconds: 60
+      key: user
+deny_tools:
+  - python.exec
+  - bash.exec
+  - code.exec
+  - shell.exec
+network_scopes:
+  - net.
+network_tools:
+  - web.
+  - http.
+  - fetch.
+  - request.
+on_error: block
+model: gpt-4

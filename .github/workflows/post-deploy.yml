@@ -1,0 +1,68 @@
+name: Post-Deploy Smoke
+
+on:
+  deployment_status:
+
+jobs:
+  smoke:
+    name: Smoke (post-deploy)
+    runs-on: ubuntu-latest
+    # Only run when a deployment to production/dev succeeds
+    if: |
+      github.event.deployment_status.state == 'success' &&
+      contains(github.event.deployment_status.environment_url, 'governs-precheck.onrender.com')
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install httpx
+        run: pip install httpx
+
+      - name: Health check
+        run: |
+          python - <<'EOF'
+          import httpx, sys, time
+          url = "https://governs-precheck.onrender.com/api/v1/health"
+          # Render may still be warming up — retry for up to 60s
+          for attempt in range(6):
+              try:
+                  r = httpx.get(url, timeout=15)
+                  if r.status_code == 200:
+                      print(f"health ok after {attempt+1} attempt(s)")
+                      sys.exit(0)
+                  print(f"attempt {attempt+1}: status {r.status_code}")
+              except Exception as e:
+                  print(f"attempt {attempt+1}: {e}")
+              time.sleep(10)
+          print("FAIL: health check did not pass within 60s")
+          sys.exit(1)
+          EOF
+
+      - name: Precheck smoke request
+        env:
+          SMOKE_API_KEY: ${{ secrets.SMOKE_API_KEY }}
+        run: |
+          python - <<'EOF'
+          import httpx, sys, os
+          key = os.environ.get("SMOKE_API_KEY", "")
+          if not key:
+              print("SMOKE_API_KEY not set — skipping")
+              sys.exit(0)
+          r = httpx.post(
+              "https://governs-precheck.onrender.com/api/v1/precheck",
+              headers={"X-Governs-Key": key},
+              json={"tool": "chat", "raw_text": "post-deploy smoke test"},
+              timeout=30,
+          )
+          print(f"status={r.status_code} body={r.text[:300]}")
+          if r.status_code not in (200, 201):
+              print("FAIL: precheck smoke request failed")
+              sys.exit(1)
+          print("PASS: precheck is responding correctly post-deploy")
+          EOF
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "::error::Post-deploy smoke failed for https://governs-precheck.onrender.com — check Render logs"
