@@ -8,7 +8,7 @@ import time
 from datetime import datetime
 from typing import List, Optional, Tuple
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
 from .auth import AuthContext, require_api_key
@@ -153,6 +153,37 @@ async def revoke_api_key(
 async def health():
     """Health check endpoint"""
     return {"ok": True, "service": "governsai-precheck", "version": "0.1.0"}
+
+
+@router.post("/v1/internal/policy/invalidate")
+async def invalidate_policy_cache(request: Request, payload: dict):
+    """Drop the cached active policy for a single org.
+
+    Called by the dashboard after a policy create/update/delete (ADR-005).
+    Authenticated via HMAC over `org_id` with `KEY_HMAC_SECRET` — the same
+    shared secret used by api-key sync, so no new secret material to manage.
+
+    Body:   {"org_id": "<id>"}
+    Header: X-Govs-Invalidate-HMAC: hex(hmac_sha256(KEY_HMAC_SECRET, org_id))
+    """
+    import hashlib as _hashlib
+    import hmac as _hmac
+
+    from .policy_source import invalidate
+    from .settings import settings as _settings
+
+    org_id = (payload or {}).get("org_id")
+    if not isinstance(org_id, str) or not org_id:
+        raise HTTPException(status_code=400, detail="org_id required")
+
+    secret = _settings.key_hmac_secret.encode()
+    expected = _hmac.new(secret, org_id.encode(), _hashlib.sha256).hexdigest()
+    provided = request.headers.get("x-govs-invalidate-hmac", "")
+    if not _hmac.compare_digest(expected, provided):
+        raise HTTPException(status_code=401, detail="invalid signature")
+
+    invalidate(org_id)
+    return {"invalidated": org_id}
 
 
 @router.get("/v1/ready")
@@ -343,6 +374,7 @@ async def precheck(
                 tool_config=tool_config,
                 user_id=user_id,
                 budget_context=budget_context,
+                org_id=org_id,
             )
 
             # Add budget info to result if not already present
@@ -496,6 +528,7 @@ async def postcheck(
             tool_config=tool_config,
             user_id=user_id,
             budget_context=budget_context,
+            org_id=org_id,
         )
 
         # Add budget info to result if not already present
