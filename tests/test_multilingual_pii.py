@@ -32,7 +32,8 @@ def _has_model(name: str) -> bool:
 
 
 requires_presidio = pytest.mark.skipif(
-    policies.ANALYZER is None, reason="Presidio analyzer unavailable in this environment"
+    policies.ANALYZER is None,
+    reason="Presidio analyzer unavailable in this environment",
 )
 
 
@@ -97,7 +98,9 @@ class TestLanguageHint:
         assert language_hint(None, {"language": "fr"}) == "fr"
 
     def test_tool_config_wins(self):
-        assert language_hint({"metadata": {"language": "es"}}, {"language": "fr"}) == "es"
+        assert (
+            language_hint({"metadata": {"language": "es"}}, {"language": "fr"}) == "es"
+        )
 
     @pytest.mark.parametrize(
         "tool_config,policy_config",
@@ -120,7 +123,9 @@ class TestSettings:
         assert s.presidio_language_list() == ["en", "es", "fr"]
 
     def test_empty_language_list_defaults_to_english(self):
-        assert Settings(presidio_languages="  ,  ", debug=True).presidio_language_list() == ["en"]
+        assert Settings(
+            presidio_languages="  ,  ", debug=True
+        ).presidio_language_list() == ["en"]
 
     def test_invalid_language_mode_rejected(self):
         with pytest.raises(ValueError, match="PRESIDIO_LANGUAGE_MODE"):
@@ -128,7 +133,10 @@ class TestSettings:
 
     @pytest.mark.parametrize("mode", ["hint", "union"])
     def test_valid_language_modes_accepted(self, mode):
-        assert Settings(presidio_language_mode=mode, debug=True).presidio_language_mode == mode
+        assert (
+            Settings(presidio_language_mode=mode, debug=True).presidio_language_mode
+            == mode
+        )
 
 
 @pytest.mark.multilingual
@@ -138,9 +146,24 @@ class TestNonEnglishRedaction:
     @pytest.mark.parametrize(
         "lang,model,text,secret",
         [
-            ("es", "es_core_news_sm", "El paciente Juan Martínez necesita revisión.", "Juan Martínez"),
-            ("fr", "fr_core_news_sm", "Le patient Jean Dupont doit être revu.", "Jean Dupont"),
-            ("de", "de_core_news_sm", "Der Patient Hans Müller braucht eine Untersuchung.", "Hans Müller"),
+            (
+                "es",
+                "es_core_news_sm",
+                "El paciente Juan Martínez necesita revisión.",
+                "Juan Martínez",
+            ),
+            (
+                "fr",
+                "fr_core_news_sm",
+                "Le patient Jean Dupont doit être revu.",
+                "Jean Dupont",
+            ),
+            (
+                "de",
+                "de_core_news_sm",
+                "Der Patient Hans Müller braucht eine Untersuchung.",
+                "Hans Müller",
+            ),
         ],
     )
     def test_person_redacted_in_language(self, lang, model, text, secret):

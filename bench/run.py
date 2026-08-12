@@ -75,16 +75,19 @@ def arm_legacy(text: str, lang: str) -> Tuple[str, List[str]]:
     Kept so before/after numbers come out of a single run rather than being
     compared across two trees.
     """
-    from app.policies import ANALYZER, ANONYMIZER
-    from app.policies import entity_type_to_placeholder, is_false_positive
     from presidio_anonymizer.entities import OperatorConfig
+
+    from app.policies import (
+        ANALYZER,
+        ANONYMIZER,
+        entity_type_to_placeholder,
+        is_false_positive,
+    )
 
     if ANALYZER is None:
         return text, []
     try:
-        results = ANALYZER.analyze(
-            text=text, entities=LEGACY_ENTITIES, language="en"
-        )
+        results = ANALYZER.analyze(text=text, entities=LEGACY_ENTITIES, language="en")
     except Exception:
         return text, []
     # The pre-fix code passed the whole text to the false-positive filter
@@ -117,8 +120,9 @@ def arm_presidio_unrestricted(text: str, lang: str) -> Tuple[str, List[str]]:
     alone — i.e. detection the loaded model already performs and the pipeline
     then discards.
     """
-    from app.policies import ANALYZER, ANONYMIZER, entity_type_to_placeholder
     from presidio_anonymizer.entities import OperatorConfig
+
+    from app.policies import ANALYZER, ANONYMIZER, entity_type_to_placeholder
 
     if ANALYZER is None:
         return text, []
@@ -177,7 +181,9 @@ class Accumulator:
         self.clean_total = 0
         self.clean_modified = 0
         self.latencies: List[float] = []
-        self.by_entity: Dict[str, List[int]] = defaultdict(lambda: [0, 0])  # [leaked, total]
+        self.by_entity: Dict[str, List[int]] = defaultdict(
+            lambda: [0, 0]
+        )  # [leaked, total]
 
     def rate(self, num: int, den: int) -> Optional[float]:
         return round(num / den, 4) if den else None
@@ -218,7 +224,10 @@ def run_arm(name: str, arm: Arm, items: List[Item]) -> Dict[str, object]:
         try:
             out, _reasons = arm(item.text, item.lang)
         except Exception as exc:  # an arm that crashes leaks everything
-            print(f"  ! {name} raised on {item.id}: {type(exc).__name__}: {exc}", file=sys.stderr)
+            print(
+                f"  ! {name} raised on {item.id}: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
             out = item.text
         elapsed_ms = (time.perf_counter() - t0) * 1000
 
@@ -248,11 +257,17 @@ def run_arm(name: str, arm: Arm, items: List[Item]) -> Dict[str, object]:
 
     return {
         "overall": overall.summary(),
-        "high_sensitivity_leakage": overall.rate(high_sens.spans_leaked, high_sens.spans_total),
+        "high_sensitivity_leakage": overall.rate(
+            high_sens.spans_leaked, high_sens.spans_total
+        ),
         "by_lang": {k: v.summary() for k, v in sorted(by_lang.items())},
         "by_tier": {k: v.summary() for k, v in sorted(by_tier.items())},
         "by_entity": {
-            k: {"leaked": v[0], "total": v[1], "leakage": round(v[0] / v[1], 4) if v[1] else None}
+            k: {
+                "leaked": v[0],
+                "total": v[1],
+                "leakage": round(v[0] / v[1], 4) if v[1] else None,
+            }
             for k, v in sorted(overall.by_entity.items())
         },
     }
@@ -266,7 +281,9 @@ def print_report(results: Dict[str, Dict[str, object]]) -> None:
     arms = list(results.keys())
 
     print("\n=== Overall (leakage = ground-truth PII values surviving verbatim) ===\n")
-    print(f"{'arm':<24}{'leakage':>9}{'item_leak':>11}{'high_sens':>11}{'over_redact':>13}{'p50 ms':>9}{'p95 ms':>9}")
+    print(
+        f"{'arm':<24}{'leakage':>9}{'item_leak':>11}{'high_sens':>11}{'over_redact':>13}{'p50 ms':>9}{'p95 ms':>9}"
+    )
     for arm in arms:
         o = results[arm]["overall"]
         print(
@@ -280,7 +297,10 @@ def print_report(results: Dict[str, Dict[str, object]]) -> None:
     langs = sorted({lang for arm in arms for lang in results[arm]["by_lang"]})
     print(f"{'arm':<24}" + "".join(f"{lang:>9}" for lang in langs))
     for arm in arms:
-        row = "".join(fmt_pct(results[arm]["by_lang"].get(lang, {}).get("leakage")) for lang in langs)
+        row = "".join(
+            fmt_pct(results[arm]["by_lang"].get(lang, {}).get("leakage"))
+            for lang in langs
+        )
         print(f"{arm:<24}{row}")
 
     print("\n=== Leakage by tier ===\n")
@@ -288,7 +308,8 @@ def print_report(results: Dict[str, Dict[str, object]]) -> None:
     print(f"{'arm':<24}" + "".join(f"{t[:9]:>18}" for t in tiers))
     for arm in arms:
         row = "".join(
-            f"{fmt_pct(results[arm]['by_tier'].get(t, {}).get('leakage')):>18}" for t in tiers
+            f"{fmt_pct(results[arm]['by_tier'].get(t, {}).get('leakage')):>18}"
+            for t in tiers
         )
         print(f"{arm:<24}{row}")
 
@@ -312,7 +333,9 @@ def main() -> int:
     args = ap.parse_args()
 
     items = build(per_template=args.per_template, languages=args.languages)
-    print(f"corpus: {len(items)} items, {sum(len(i.spans) for i in items)} annotated spans")
+    print(
+        f"corpus: {len(items)} items, {sum(len(i.spans) for i in items)} annotated spans"
+    )
 
     results: Dict[str, Dict[str, object]] = {}
     for name in args.arms:

@@ -62,7 +62,13 @@ class TestBypassVariants:
 
     @pytest.mark.parametrize(
         "tool",
-        ["subprocess.run", "subprocess.popen", "os.system", "child_process.spawn", "runtime.exec"],
+        [
+            "subprocess.run",
+            "subprocess.popen",
+            "os.system",
+            "child_process.spawn",
+            "runtime.exec",
+        ],
     )
     def test_semantically_equivalent_primitives_denied(self, tool):
         """Names that are code execution by any other spelling."""

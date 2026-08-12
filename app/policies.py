@@ -367,9 +367,7 @@ def build_presidio():
         # analyzer whose languages differ from it; constructing the registry
         # without this is what silently drops everything back to English.
         registry = RecognizerRegistry(supported_languages=languages)
-        registry.load_predefined_recognizers(
-            languages=languages, nlp_engine=nlp_engine
-        )
+        registry.load_predefined_recognizers(languages=languages, nlp_engine=nlp_engine)
 
         for language in languages:
             for recognizer in _custom_recognizers(language):

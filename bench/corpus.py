@@ -67,19 +67,63 @@ class Item:
 # ---------------------------------------------------------------------------
 
 PERSONS = {
-    "en": ["John Smith", "Maria Garcia", "Robert Johnson", "Sarah Chen", "David Miller"],
-    "es": ["Juan Martínez", "Lucía Fernández", "Carlos Ruiz", "Ana Torres", "Miguel Ortega"],
-    "fr": ["Jean Dupont", "Marie Lefèvre", "Pierre Moreau", "Claire Rousseau", "Luc Bernard"],
-    "de": ["Hans Müller", "Anna Schmidt", "Peter Wagner", "Julia Becker", "Thomas Fischer"],
+    "en": [
+        "John Smith",
+        "Maria Garcia",
+        "Robert Johnson",
+        "Sarah Chen",
+        "David Miller",
+    ],
+    "es": [
+        "Juan Martínez",
+        "Lucía Fernández",
+        "Carlos Ruiz",
+        "Ana Torres",
+        "Miguel Ortega",
+    ],
+    "fr": [
+        "Jean Dupont",
+        "Marie Lefèvre",
+        "Pierre Moreau",
+        "Claire Rousseau",
+        "Luc Bernard",
+    ],
+    "de": [
+        "Hans Müller",
+        "Anna Schmidt",
+        "Peter Wagner",
+        "Julia Becker",
+        "Thomas Fischer",
+    ],
     "zh": ["张伟", "王芳", "李娜", "刘强", "陈静"],
 }
 
 LOCATIONS = {
-    "en": ["1600 Pennsylvania Avenue, Washington DC", "42 Baker Street, London", "500 Market St, San Francisco"],
-    "es": ["Calle Gran Vía 28, Madrid", "Avenida Diagonal 405, Barcelona", "Plaza Mayor 7, Salamanca"],
-    "fr": ["12 Rue de Rivoli, Paris", "3 Avenue Jean Médecin, Nice", "8 Quai Saint-Vincent, Lyon"],
-    "de": ["Unter den Linden 5, Berlin", "Maximilianstraße 13, München", "Reeperbahn 22, Hamburg"],
-    "zh": ["北京市朝阳区建国路88号", "上海市浦东新区世纪大道100号", "广州市天河区天河路299号"],
+    "en": [
+        "1600 Pennsylvania Avenue, Washington DC",
+        "42 Baker Street, London",
+        "500 Market St, San Francisco",
+    ],
+    "es": [
+        "Calle Gran Vía 28, Madrid",
+        "Avenida Diagonal 405, Barcelona",
+        "Plaza Mayor 7, Salamanca",
+    ],
+    "fr": [
+        "12 Rue de Rivoli, Paris",
+        "3 Avenue Jean Médecin, Nice",
+        "8 Quai Saint-Vincent, Lyon",
+    ],
+    "de": [
+        "Unter den Linden 5, Berlin",
+        "Maximilianstraße 13, München",
+        "Reeperbahn 22, Hamburg",
+    ],
+    "zh": [
+        "北京市朝阳区建国路88号",
+        "上海市浦东新区世纪大道100号",
+        "广州市天河区天河路299号",
+    ],
 }
 
 ORG_DOMAINS = ["acme.com", "globex.io", "initech.co", "umbrella-health.org"]
@@ -98,7 +142,11 @@ PHONES = {
 # not be penalised for rejecting a number that was never a card in the first place.
 CARDS = ["4532015112830366", "5425233430109903", "4111 1111 1111 1111"]
 
-IBANS = ["DE89370400440532013000", "FR1420041010050500013M02606", "ES9121000418450200051332"]
+IBANS = [
+    "DE89370400440532013000",
+    "FR1420041010050500013M02606",
+    "ES9121000418450200051332",
+]
 
 SSNS = ["123-45-6789", "078-05-1120"]
 
@@ -330,7 +378,9 @@ def render(template: str, rng: random.Random, lang: str) -> Tuple[str, List[Span
     return "".join(out), spans
 
 
-def _structured_items(rng: random.Random, lang: str, n: int, start_idx: int) -> List[Item]:
+def _structured_items(
+    rng: random.Random, lang: str, n: int, start_idx: int
+) -> List[Item]:
     """PII nested inside JSON tool arguments at varying depth."""
     items: List[Item] = []
     for i in range(n):
@@ -357,7 +407,9 @@ def _structured_items(rng: random.Random, lang: str, n: int, start_idx: int) -> 
         ):
             idx = text.find(value)
             if idx >= 0:
-                spans.append(Span(start=idx, end=idx + len(value), type=etype, value=value))
+                spans.append(
+                    Span(start=idx, end=idx + len(value), type=etype, value=value)
+                )
 
         items.append(
             Item(
@@ -375,36 +427,66 @@ def _structured_items(rng: random.Random, lang: str, n: int, start_idx: int) -> 
 # Partial and obfuscated templates carry their PII inline rather than in slots;
 # these tables give the ground-truth values the detector is expected to catch.
 INLINE_TRUTH: Dict[str, List[Tuple[str, str]]] = {
-    "The card ending in 0366 belongs to J. S. — confirm before charging.": [("0366", "CREDIT_CARD")],
+    "The card ending in 0366 belongs to J. S. — confirm before charging.": [
+        ("0366", "CREDIT_CARD")
+    ],
     "Patient initials M.G., born 1982, seen last Tuesday.": [("M.G.", "PERSON")],
     "Reach the account holder on the number ending 0132.": [("0132", "PHONE_NUMBER")],
     "SSN last four is 6789 for the applicant from Ohio.": [("6789", "US_SSN")],
-    "Reach him at j dot smith at acme dot com when you can.": [("j dot smith at acme dot com", "EMAIL_ADDRESS")],
-    "Contact: j . s m i t h @ a c m e . c o m": [("j . s m i t h @ a c m e . c o m", "EMAIL_ADDRESS")],
-    "Card number four five three two 0151 1283 0366.": [("four five three two 0151 1283 0366", "CREDIT_CARD")],
+    "Reach him at j dot smith at acme dot com when you can.": [
+        ("j dot smith at acme dot com", "EMAIL_ADDRESS")
+    ],
+    "Contact: j . s m i t h @ a c m e . c o m": [
+        ("j . s m i t h @ a c m e . c o m", "EMAIL_ADDRESS")
+    ],
+    "Card number four five three two 0151 1283 0366.": [
+        ("four five three two 0151 1283 0366", "CREDIT_CARD")
+    ],
     "Phone: four one five, five five five, zero one three two.": [
         ("four one five, five five five, zero one three two", "PHONE_NUMBER")
     ],
-    "La tarjeta terminada en 0366 pertenece a J. M. — confirmar antes de cobrar.": [("0366", "CREDIT_CARD")],
+    "La tarjeta terminada en 0366 pertenece a J. M. — confirmar antes de cobrar.": [
+        ("0366", "CREDIT_CARD")
+    ],
     "Paciente con iniciales L. F., nacida en 1982.": [("L. F.", "PERSON")],
-    "Su correo es j punto smith arroba acme punto com.": [("j punto smith arroba acme punto com", "EMAIL_ADDRESS")],
-    "Teléfono: seis uno dos, tres cuatro, cinco seis.": [("seis uno dos, tres cuatro, cinco seis", "PHONE_NUMBER")],
-    "La carte se terminant par 0366 appartient à J. D. — à confirmer.": [("0366", "CREDIT_CARD")],
+    "Su correo es j punto smith arroba acme punto com.": [
+        ("j punto smith arroba acme punto com", "EMAIL_ADDRESS")
+    ],
+    "Teléfono: seis uno dos, tres cuatro, cinco seis.": [
+        ("seis uno dos, tres cuatro, cinco seis", "PHONE_NUMBER")
+    ],
+    "La carte se terminant par 0366 appartient à J. D. — à confirmer.": [
+        ("0366", "CREDIT_CARD")
+    ],
     "Patiente aux initiales M. L., née en 1982.": [("M. L.", "PERSON")],
-    "Son adresse est j point smith arobase acme point com.": [("j point smith arobase acme point com", "EMAIL_ADDRESS")],
-    "Téléphone : zéro six, douze, trente-quatre.": [("zéro six, douze, trente-quatre", "PHONE_NUMBER")],
-    "Die Karte endend auf 0366 gehört H. M. — bitte bestätigen.": [("0366", "CREDIT_CARD")],
+    "Son adresse est j point smith arobase acme point com.": [
+        ("j point smith arobase acme point com", "EMAIL_ADDRESS")
+    ],
+    "Téléphone : zéro six, douze, trente-quatre.": [
+        ("zéro six, douze, trente-quatre", "PHONE_NUMBER")
+    ],
+    "Die Karte endend auf 0366 gehört H. M. — bitte bestätigen.": [
+        ("0366", "CREDIT_CARD")
+    ],
     "Patientin mit den Initialen A. S., geboren 1982.": [("A. S.", "PERSON")],
-    "Seine Adresse ist j punkt smith at acme punkt com.": [("j punkt smith at acme punkt com", "EMAIL_ADDRESS")],
-    "Telefon: null eins fünf eins, zwei drei vier.": [("null eins fünf eins, zwei drei vier", "PHONE_NUMBER")],
+    "Seine Adresse ist j punkt smith at acme punkt com.": [
+        ("j punkt smith at acme punkt com", "EMAIL_ADDRESS")
+    ],
+    "Telefon: null eins fünf eins, zwei drei vier.": [
+        ("null eins fünf eins, zwei drei vier", "PHONE_NUMBER")
+    ],
     "尾号 0366 的卡属于张先生，扣款前请确认。": [("0366", "CREDIT_CARD")],
     "患者姓名缩写 W.F.，1982 年出生。": [("W.F.", "PERSON")],
-    "他的邮箱是 j 点 smith 艾特 acme 点 com。": [("j 点 smith 艾特 acme 点 com", "EMAIL_ADDRESS")],
+    "他的邮箱是 j 点 smith 艾特 acme 点 com。": [
+        ("j 点 smith 艾特 acme 点 com", "EMAIL_ADDRESS")
+    ],
     "电话：一三八 零零一三 八零零零。": [("一三八 零零一三 八零零零", "PHONE_NUMBER")],
 }
 
 
-def build(per_template: int = 6, languages: Optional[Iterable[str]] = None) -> List[Item]:
+def build(
+    per_template: int = 6, languages: Optional[Iterable[str]] = None
+) -> List[Item]:
     """Generate the corpus. Deterministic for a fixed SEED."""
     rng = random.Random(SEED)
     langs = list(languages or LANGUAGES)
@@ -435,7 +517,11 @@ def build(per_template: int = 6, languages: Optional[Iterable[str]] = None) -> L
                 for value, etype in truth:
                     idx = template.find(value)
                     if idx >= 0:
-                        spans.append(Span(start=idx, end=idx + len(value), type=etype, value=value))
+                        spans.append(
+                            Span(
+                                start=idx, end=idx + len(value), type=etype, value=value
+                            )
+                        )
                 items.append(
                     Item(
                         id=f"{lang}-{tier}-{counter:04d}",
