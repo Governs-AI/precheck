@@ -79,10 +79,13 @@ jobs:
     env:
       APP_BIND: 127.0.0.1:8082
       DB_URL: sqlite:///./loadtest.db
+      # DEBUG=false so the load test exercises the production settings path,
+      # which means these must clear the 32-character minimum in
+      # Settings._validate_secret. Throwaway CI values, not secrets.
       DEBUG: "false"
-      KEY_HMAC_SECRET: ci-load-hmac-secret
-      PII_TOKEN_SALT: ci-load-salt
-      WEBHOOK_SECRET: ci-load-webhook-secret
+      KEY_HMAC_SECRET: ci-load-hmac-secret-padded-to-32-chars-min
+      PII_TOKEN_SALT: ci-load-token-salt-padded-to-32-chars-min
+      WEBHOOK_SECRET: ci-load-webhook-secret-padded-to-32-chars-min
       PRECHECK_DLQ: /tmp/precheck-load.dlq.jsonl
       LOAD_TEST_API_KEY: GAI_ci_load_test_key
       PRECHECK_BASE_URL: http://127.0.0.1:8082
