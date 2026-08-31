@@ -4,6 +4,7 @@
 See ADR-005 for design. Tests cover cache hit/miss/expiry, missing-org, priority
 ordering, the dashboard-shape → precheck-shape translation, and invalidate().
 """
+
 from __future__ import annotations
 
 import time
@@ -117,8 +118,12 @@ def test_unknown_pii_action_falls_back_to_redact(db_session):
 
 # ─── priority order ───────────────────────────────────────────────────────
 def test_highest_priority_active_policy_wins(db_session):
-    _make_policy(db_session, org_id="org-9", name="lo", defaults={"pii": "redact"}, priority=1)
-    _make_policy(db_session, org_id="org-9", name="hi", defaults={"pii": "block"}, priority=10)
+    _make_policy(
+        db_session, org_id="org-9", name="lo", defaults={"pii": "redact"}, priority=1
+    )
+    _make_policy(
+        db_session, org_id="org-9", name="hi", defaults={"pii": "block"}, priority=10
+    )
     cfg = policy_source.get_active_policy("org-9")
     # priority=10 ("block") must beat priority=1 ("redact")
     assert cfg["defaults"]["ingress"]["action"] == "deny"
@@ -126,8 +131,22 @@ def test_highest_priority_active_policy_wins(db_session):
 
 
 def test_inactive_policy_ignored(db_session):
-    _make_policy(db_session, org_id="org-10", name="dead", defaults={"pii": "block"}, priority=999, is_active=False)
-    _make_policy(db_session, org_id="org-10", name="live", defaults={"pii": "redact"}, priority=1, is_active=True)
+    _make_policy(
+        db_session,
+        org_id="org-10",
+        name="dead",
+        defaults={"pii": "block"},
+        priority=999,
+        is_active=False,
+    )
+    _make_policy(
+        db_session,
+        org_id="org-10",
+        name="live",
+        defaults={"pii": "redact"},
+        priority=1,
+        is_active=True,
+    )
     cfg = policy_source.get_active_policy("org-10")
     assert cfg["_policy_name"] == "live"
 
@@ -159,13 +178,19 @@ def test_invalidate_forces_refetch(db_session):
     assert first["defaults"]["ingress"]["action"] == "redact"
 
     # mutate the underlying row
-    row = db_session.query(DashboardPolicy).filter(DashboardPolicy.org_id == "org-i").one()
+    row = (
+        db_session.query(DashboardPolicy)
+        .filter(DashboardPolicy.org_id == "org-i")
+        .one()
+    )
     row.defaults = {"pii": "block"}
     db_session.commit()
 
     # without invalidation, the cache should still serve the old value
     cached = policy_source.get_active_policy("org-i")
-    assert cached["defaults"]["ingress"]["action"] == "redact", "cache should still hold stale entry"
+    assert (
+        cached["defaults"]["ingress"]["action"] == "redact"
+    ), "cache should still hold stale entry"
 
     # invalidate → next call refetches and reflects the change
     policy_source.invalidate("org-i")
@@ -189,7 +214,11 @@ def test_ttl_expiry_forces_refetch(db_session, monkeypatch):
     monkeypatch.setattr(time, "monotonic", lambda: base + 5)
 
     # mutate the row; without a hit-spy, the new value proves a refetch happened
-    row = db_session.query(DashboardPolicy).filter(DashboardPolicy.org_id == "org-t").one()
+    row = (
+        db_session.query(DashboardPolicy)
+        .filter(DashboardPolicy.org_id == "org-t")
+        .one()
+    )
     row.defaults = {"pii": "block"}
     db_session.commit()
 

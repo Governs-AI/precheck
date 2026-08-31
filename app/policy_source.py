@@ -11,6 +11,7 @@ The returned policy dict has the shape that `evaluate_with_payload_policy`
 already understands (precheck/app/policies.py), so the evaluator does not
 need to learn a new format — we just translate at the edge.
 """
+
 from __future__ import annotations
 
 import logging
@@ -18,7 +19,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from sqlalchemy.orm import Session
 
@@ -55,13 +56,13 @@ _metrics = {"hit": 0, "miss": 0, "invalidate": 0}
 # shape `defaults[direction]["action"]` with action ∈
 # {"deny", "redact", "tokenize", "pass_through"}.
 _PII_ACTION_MAP = {
-    "redact":       "redact",
-    "block":        "deny",
-    "deny":         "deny",
-    "tokenize":     "tokenize",
-    "pass":         "pass_through",
+    "redact": "redact",
+    "block": "deny",
+    "deny": "deny",
+    "tokenize": "tokenize",
+    "pass": "pass_through",
     "pass_through": "pass_through",
-    "allow":        "pass_through",
+    "allow": "pass_through",
 }
 
 
@@ -72,7 +73,10 @@ def _map_row_to_policy_config(row: DashboardPolicy) -> dict:
     (precheck/app/policies.py). Unknown keys in `row.defaults` are preserved
     verbatim so future extensions don't need to touch this function.
     """
-    raw_defaults = row.defaults or {}
+    # Annotated Any rather than Dict[str, Any]: `row.defaults` is a SQLAlchemy
+    # Column[Any] at type-check time, so a concrete dict annotation conflicts
+    # with the assignment even though the runtime value is a dict.
+    raw_defaults: Any = row.defaults or {}
 
     # Translate the v1 convention; default to "redact" if the field is absent.
     pii_action_in = str(raw_defaults.get("pii", "redact")).lower()
@@ -82,20 +86,20 @@ def _map_row_to_policy_config(row: DashboardPolicy) -> dict:
         "version": row.version or "v1",
         "defaults": {
             "ingress": {"action": pii_action},
-            "egress":  {"action": pii_action},
+            "egress": {"action": pii_action},
             # Forward any non-pii defaults verbatim for forward-compat.
             **{k: v for k, v in raw_defaults.items() if k != "pii"},
         },
-        "tool_access":    row.tool_access or {},
-        "deny_tools":     row.deny_tools or [],
-        "allow_tools":    row.allow_tools or [],
+        "tool_access": row.tool_access or {},
+        "deny_tools": row.deny_tools or [],
+        "allow_tools": row.allow_tools or [],
         "network_scopes": row.network_scopes or [],
-        "network_tools":  row.network_tools or [],
-        "on_error":       row.on_error or "block",
+        "network_tools": row.network_tools or [],
+        "on_error": row.on_error or "block",
         # Provenance — useful in logs and audit, ignored by the evaluator.
-        "_policy_id":     row.id,
-        "_policy_name":   row.name,
-        "_priority":      row.priority,
+        "_policy_id": row.id,
+        "_policy_name": row.name,
+        "_priority": row.priority,
     }
 
 
@@ -111,7 +115,9 @@ def _fetch_from_db(org_id: str) -> Optional[dict]:
                 DashboardPolicy.org_id == org_id,
                 DashboardPolicy.is_active.is_(True),
             )
-            .order_by(DashboardPolicy.priority.desc(), DashboardPolicy.updated_at.desc())
+            .order_by(
+                DashboardPolicy.priority.desc(), DashboardPolicy.updated_at.desc()
+            )
             .first()
         )
         if row is None:
@@ -120,9 +126,7 @@ def _fetch_from_db(org_id: str) -> Optional[dict]:
     except Exception as exc:
         # Don't blow up the request path on a DB hiccup — let the caller fall
         # back to the YAML policy. Logged loudly so it's visible in audits.
-        logger.warning(
-            "policy_source: db fetch failed for org=%s err=%s", org_id, exc
-        )
+        logger.warning("policy_source: db fetch failed for org=%s err=%s", org_id, exc)
         return None
     finally:
         db.close()

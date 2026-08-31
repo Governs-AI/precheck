@@ -8,7 +8,14 @@ import time
 from datetime import datetime
 from typing import List, Optional, Tuple
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Request,
+    Response,
+)
 from sqlalchemy.orm import Session
 
 from .auth import AuthContext, require_api_key

@@ -24,8 +24,21 @@ GovernsAI Precheck is a policy evaluation and PII redaction service that provide
 ### 3. PII Detection & Redaction
 - **Presidio integration**: Advanced NLP-based PII detection
 - **Fallback detection**: Regex-based detection when Presidio unavailable
-- **Multiple PII types**: Email, SSN, phone numbers, credit cards, API keys, JWT tokens
-- **False positive filtering**: Context-aware filtering to reduce false positives
+- **Multiple PII types**: names, addresses, email, SSN, phone numbers, credit cards, IBAN, IP addresses, HIPAA PHI identifiers, PCI fields, API keys, JWT tokens
+- **Multilingual**: analyzer built per configured language (`PRESIDIO_LANGUAGES`); en, es, fr, de, zh models ship in the image
+- **False positive filtering**: context-aware filtering over the matched span
+- **Measured**: `bench/` reports leakage, over-redaction and latency per language, tier and entity type — see `bench/README.md`
+
+**Entity coverage.** `DETECT_ENTITIES` in `app/policies.py` is the list the
+analyzer is asked for. `ORGANIZATION` and `DATE_TIME` are deliberately excluded:
+both are recognised by the spaCy pipeline but neither identifies a person, and
+including them redacted 61.5% of PII-free control text. Utility loss on that
+scale makes operators disable redaction outright, which is worse than leaving
+those entities in place.
+
+**Known residual gaps** (measured, unfixed): obfuscated surface forms 75%
+leakage, partial disclosure 83.3%, Chinese 32.1%, US_SSN 14.3%. Closing the
+first two needs a different class of detector, not a better pattern.
 
 ### 4. Event Emission & Monitoring
 - **Webhook events**: Real-time policy decision events with HMAC authentication
@@ -591,10 +604,16 @@ The policy evaluation system follows a strict precedence hierarchy (highest to l
 
 ### 1. **DENY_TOOLS** (Highest Priority)
 - **Purpose**: Hard deny for dangerous tools
-- **Tools**: `python.exec`, `bash.exec`, `code.exec`, `shell.exec`
+- **Tools**: `python.exec`, `bash.exec`, `code.exec`, `shell.exec`, `subprocess.run`, `subprocess.popen`, `os.system`, `child_process.exec`, `child_process.spawn`, `runtime.exec`
 - **Decision**: Always `deny`
 - **Policy ID**: `deny-exec`
 - **Reason**: `blocked tool: code/exec`
+- **Matching**: `is_denied_tool()` normalises case, whitespace and separators
+  (`_`, `-`, `/`, `:` all fold to `.`), then matches on exact name, component
+  set (so `exec.python` matches `python.exec`), containment within a namespaced
+  path (`agent.python.exec.v2`), and explicit `namespace.*` wildcards. Denial is
+  a security boundary, so matching is deliberately generous: a false deny is a
+  support ticket, a false allow is an incident.
 
 ### 2. **TOOL_SPECIFIC** (High Priority)
 - **Purpose**: Tool-specific rules in `policy.tool_access.yaml`
@@ -931,7 +950,9 @@ Budget limits can be configured per user:
 | `ON_ERROR` | Error handling behavior | `block` |
 | `POLICY_FILE` | Policy file path | `policy.tool_access.yaml` |
 | `USE_PRESIDIO` | Enable Presidio PII detection | `true` |
-| `PRESIDIO_MODEL` | spaCy model for Presidio | `en_core_web_sm` |
+| `PRESIDIO_MODEL` | English spaCy model for Presidio | `en_core_web_sm` |
+| `PRESIDIO_LANGUAGES` | Comma-separated analyzer languages; each needs its spaCy model installed | `en` |
+| `PRESIDIO_LANGUAGE_MODE` | `hint` (one pass, caller-supplied language) or `union` (all configured languages, recall-safe, ~N× NLP cost and higher false positives) | `hint` |
 
 ### API Configuration
 
@@ -1171,6 +1192,40 @@ curl -X POST http://localhost:8080/api/v1/postcheck \
 ```
 
 ## Recent Changes Log
+- **2026-08-11**: **PII detection benchmark + four detection fixes.** Added `bench/`, a
+  438-item span-annotated corpus across five languages measuring the deployed
+  redaction path rather than the detector in isolation. Overall leakage fell
+  **51.3% → 8.2%**; high-sensitivity entity leakage **89.1% → 10.6%**; PERSON and
+  LOCATION **100% → ~11.6%**; over-redaction stayed at 0% and p50 latency was
+  unchanged (2.46 → 2.48 ms).
+  - **Entity allowlist**: the analyzer was asked only for the 16 keys of
+    `ANONYMIZE_OPERATORS`, which contain no `PERSON`, `LOCATION` or `NRP`. The
+    spaCy model detected names at score 0.85 and the pipeline then discarded
+    them — names and addresses were never redacted, in any language. Replaced
+    with an explicit `DETECT_ENTITIES` list; `ORGANIZATION` and `DATE_TIME`
+    stay excluded to protect utility.
+  - **Language pin**: `ANALYZER.analyze(..., language="en")` was hardcoded at all
+    three call sites and `AnalyzerEngine` was built with `supported_languages=["en"]`,
+    so the es/fr/de/zh models the Dockerfile installs were unreachable. Added
+    `PRESIDIO_LANGUAGES`, `PRESIDIO_LANGUAGE_MODE`, per-request language hints via
+    `tool_config.metadata.language`, and a shared `analyze_text()` so the three
+    sites cannot drift.
+  - **Per-language recognizer gaps**: Presidio registers `CreditCardRecognizer`
+    for en/es only, and its default phone regions exclude ES/FR/CN. A hinted
+    fr/de/zh request leaked 61.5% of card numbers. Both now registered per
+    configured language.
+  - **False-positive filter**: `is_false_positive()` was receiving the whole input
+    text instead of the matched span, so its suppression rules almost never
+    fired. The `US_SSN` recognizer also passed `deny_list=["password", "key", ...]`,
+    but Presidio's `deny_list` is a list of terms to *detect* — the literal word
+    "key" matched as an SSN. Removed; suppression lives in `is_false_positive()`.
+  - **Denylist matching**: `if tool in deny_tools` was an exact string test.
+    `Python.Exec`, `python_exec`, `exec.python` and `agent.python.exec.v2` all
+    walked past it. Replaced with `is_denied_tool()` (normalisation, component-set,
+    containment, `namespace.*` wildcards) and extended the defaults with
+    `subprocess.run`, `os.system` and other direct execution primitives.
+  - **Tests**: +69 (`test_deny_tools_matching.py`, `test_multilingual_pii.py`);
+    suite 258 → 327 passing, coverage 75.1% → 76.8%.
 - **2026-04-23**: Added the Mode 2 sidecar / proxy gateway design document at `docs/design/sidecar-mode.md`
   - **Language Decision**: Recommends Go for the proxy hot path over Node.js and Python
   - **Interception Model**: Defines `POST /v1/chat/completions` interception with `precheck` before upstream forwarding

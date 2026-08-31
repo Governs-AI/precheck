@@ -18,6 +18,9 @@ _MIN_SECRET_LENGTH = 32
 # - "local":  per-replica in-memory fallback. Intended for single-replica dev.
 _RATE_LIMIT_FAIL_MODES = {"closed", "open", "local"}
 
+# Allowed values for PRESIDIO_LANGUAGE_MODE. See Settings.presidio_language_mode.
+_PRESIDIO_LANGUAGE_MODES = {"hint", "union"}
+
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables"""
@@ -57,7 +60,23 @@ class Settings(BaseSettings):
 
     # Presidio configuration
     use_presidio: bool = True
-    presidio_model: str = "en_core_web_sm"  # sm, md, lg
+    presidio_model: str = "en_core_web_sm"  # English model override: sm, md, lg
+
+    # Languages the analyzer is built for, comma-separated. Each entry needs its
+    # spaCy model present in the image (see Dockerfile). Adding a language here
+    # without its model installed degrades to the remaining languages rather
+    # than failing the service.
+    presidio_languages: str = "en"
+
+    # How the language for a given request is chosen when more than one is
+    # configured:
+    # - "hint":  use the caller-supplied language, else the first configured one.
+    #            Cheapest; wrong hint means that request is analysed in the
+    #            wrong language and its PII is missed.
+    # - "union": analyse in every configured language and union the findings.
+    #            Recall-safe default for governance; costs roughly N x the NLP
+    #            time, so it is opt-in rather than automatic.
+    presidio_language_mode: str = "hint"
 
     # API configuration — demo_api_key intentionally removed; all keys must live in DB
     api_key_header: str = "X-Governs-Key"
@@ -88,12 +107,26 @@ class Settings(BaseSettings):
     # Policy file configuration
     policy_file: str = "policy.tool_access.yaml"
 
+    def presidio_language_list(self) -> list[str]:
+        """Configured analyzer languages, normalised and de-duplicated."""
+        seen: list[str] = []
+        for raw in self.presidio_languages.split(","):
+            code = raw.strip().lower()
+            if code and code not in seen:
+                seen.append(code)
+        return seen or ["en"]
+
     @model_validator(mode="after")
     def _reject_default_secrets(self) -> "Settings":
         if self.rate_limit_fail_mode not in _RATE_LIMIT_FAIL_MODES:
             raise ValueError(
                 f"RATE_LIMIT_FAIL_MODE must be one of {sorted(_RATE_LIMIT_FAIL_MODES)}; "
                 f"got {self.rate_limit_fail_mode!r}."
+            )
+        if self.presidio_language_mode not in _PRESIDIO_LANGUAGE_MODES:
+            raise ValueError(
+                f"PRESIDIO_LANGUAGE_MODE must be one of {sorted(_PRESIDIO_LANGUAGE_MODES)}; "
+                f"got {self.presidio_language_mode!r}."
             )
         if not self.debug:
             self._validate_secret(

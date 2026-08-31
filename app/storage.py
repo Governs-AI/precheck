@@ -149,9 +149,7 @@ def create_tables():
     `DashboardPolicy` is intentionally excluded — that table is owned and
     migrated by the dashboard (Prisma). Precheck only reads it. See ADR-005.
     """
-    owned_tables = [
-        t for t in Base.metadata.sorted_tables if t.name != "Policy"
-    ]
+    owned_tables = [t for t in Base.metadata.sorted_tables if t.name != "Policy"]
     Base.metadata.create_all(bind=engine, tables=owned_tables)
 
 
