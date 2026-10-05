@@ -27,7 +27,7 @@ GovernsAI Precheck is a policy evaluation and PII redaction service that provide
 - **Multiple PII types**: names, addresses, email, SSN, phone numbers, credit cards, IBAN, IP addresses, HIPAA PHI identifiers, PCI fields, API keys, JWT tokens
 - **Multilingual**: analyzer built per configured language (`PRESIDIO_LANGUAGES`); en, es, fr, de, zh models ship in the image
 - **False positive filtering**: context-aware filtering over the matched span
-- **Measured**: `bench/` reports leakage, over-redaction and latency per language, tier and entity type — see `bench/README.md`
+- **Measured**: `bench/` reports leakage, over-redaction and latency per language, tier and entity type — see `bench/README.md`; `--pools heldout` re-runs it on unseen values
 
 **Entity coverage.** `DETECT_ENTITIES` in `app/policies.py` is the list the
 analyzer is asked for. `ORGANIZATION` and `DATE_TIME` are deliberately excluded:
@@ -1192,6 +1192,13 @@ curl -X POST http://localhost:8080/api/v1/postcheck \
 ```
 
 ## Recent Changes Log
+- **2026-10-05**: **Benchmark held-out pools.** `bench/corpus.py` gains a second,
+  disjoint value set (`HELDOUT_POOLS`, `select_pools`, `build(pools=, seed=)`) and
+  `bench/run.py` gains `--pools {published,heldout}` and `--seed`, so the gate can
+  measure the redaction path on values the 2026-08-11 fixes never saw. Held-out
+  result: `fixed` high-sensitivity leakage 18.2% (60/330) vs 10.6% published; the
+  gap is Chinese PERSON (3/43 unseen names caught). New
+  `tests/test_bench_corpus_pools.py` (5 tests). No runtime or dependency change.
 - **2026-08-11**: **PII detection benchmark + four detection fixes.** Added `bench/`, a
   438-item span-annotated corpus across five languages measuring the deployed
   redaction path rather than the detector in isolation. Overall leakage fell

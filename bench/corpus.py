@@ -173,6 +173,144 @@ DOBS = ["DOB: 04/17/1982", "Date of Birth: 11/02/1975"]
 CVVS = ["CVV: 831"]
 EXPIRIES = ["exp: 04/28"]
 
+# ---------------------------------------------------------------------------
+# Value pools.  The constants above are the *published* pools (the corpus the
+# 2026-08-11 fixes were tuned against).  ``HELDOUT_POOLS`` holds a second set of
+# values for every slot that shares no value with the published set, so a run
+# with ``--pools heldout`` measures the deployed path on values the fixes never
+# saw.  Templates and the inline partial/obfuscated tiers are unchanged.  Card
+# numbers are Luhn-valid, IBANs pass mod-97, NPI/DEA carry valid check digits.
+# ---------------------------------------------------------------------------
+POOL_FIELDS = (
+    "PERSONS",
+    "LOCATIONS",
+    "ORG_DOMAINS",
+    "EMAIL_LOCALS",
+    "PHONES",
+    "CARDS",
+    "IBANS",
+    "SSNS",
+    "IPS",
+    "API_KEYS",
+    "JWTS",
+    "MRNS",
+    "NPIS",
+    "DEAS",
+    "MEMBER_IDS",
+    "DOBS",
+    "CVVS",
+    "EXPIRIES",
+)
+
+HELDOUT_POOLS: Dict[str, Any] = {
+    "PERSONS": {
+        "en": [
+            "Emily Watson",
+            "Carlos Mendez",
+            "James Okafor",
+            "Priya Nair",
+            "Michael Brown",
+        ],
+        "es": [
+            "Pedro Sánchez",
+            "Carmen López",
+            "Javier Gómez",
+            "Isabel Navarro",
+            "Andrés Castillo",
+        ],
+        "fr": [
+            "Antoine Girard",
+            "Sophie Lambert",
+            "Nicolas Petit",
+            "Camille Fontaine",
+            "Julien Mercier",
+        ],
+        "de": [
+            "Stefan Weber",
+            "Katharina Hoffmann",
+            "Markus Schulz",
+            "Laura Koch",
+            "Andreas Richter",
+        ],
+        "zh": ["赵敏", "孙丽", "周杰", "吴磊", "郑婷"],
+    },
+    "LOCATIONS": {
+        "en": [
+            "350 Fifth Avenue, New York",
+            "10 Downing Street, London",
+            "1 Infinite Loop, Cupertino",
+        ],
+        "es": [
+            "Paseo de la Castellana 100, Madrid",
+            "Carrer de Mallorca 401, Barcelona",
+            "Calle Larios 3, Málaga",
+        ],
+        "fr": [
+            "25 Boulevard Haussmann, Paris",
+            "7 Rue de la République, Marseille",
+            "15 Place Bellecour, Lyon",
+        ],
+        "de": [
+            "Friedrichstraße 43, Berlin",
+            "Königsallee 60, Düsseldorf",
+            "Mönckebergstraße 7, Hamburg",
+        ],
+        "zh": [
+            "深圳市南山区科技园路1号",
+            "杭州市西湖区文三路90号",
+            "成都市锦江区红星路三段16号",
+        ],
+    },
+    "ORG_DOMAINS": ["vandelay.com", "stark-med.org", "wayne.io", "hooli.co"],
+    "EMAIL_LOCALS": ["r.patel", "l.nguyen", "support", "c.rossi", "k.weber"],
+    "PHONES": {
+        "en": ["650-555-0148", "(312) 555-0163", "+1 650 555 0185"],
+        "es": ["+34 698 76 54 32", "934 567 890"],
+        "fr": ["+33 7 98 76 54 32", "04 91 23 45 67"],
+        "de": ["+49 171 9876543", "089 654321"],
+        "zh": ["+86 139 8765 4321", "021-87654321"],
+    },
+    "CARDS": ["4916338506082832", "5372198400215571", "5555 5555 5555 4444"],
+    "IBANS": [
+        "GB82WEST12345698765432",
+        "NL91ABNA0417164300",
+        "IT60X0542811101000000123456",
+    ],
+    "SSNS": ["321-54-9876", "412-67-3391"],
+    "IPS": ["172.16.254.3", "198.51.100.24", "10.1.77.140"],
+    "API_KEYS": ["sk_test_HELDOUTFIXTURE1111111111111", "AKIAHELDOUTFIXTUREXMPL1"],
+    "JWTS": [
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiI5ODc2NTQzMjEwIn0."
+        "4fYz1q2Qm3Vb8KwE5sT7uHcRjLpNnXaD0oGiBhMeSvk"
+    ],
+    "MRNS": ["MRN: 7731906", "Medical Record Number: B-5510287"],
+    "NPIS": ["NPI: 1987654328"],
+    "DEAS": ["DEA: FK7654329"],
+    "MEMBER_IDS": ["Member ID: KQ-55120378"],
+    "DOBS": ["DOB: 09/23/1979", "Date of Birth: 02/14/1988"],
+    "CVVS": ["CVV: 497"],
+    "EXPIRIES": ["exp: 11/29"],
+}
+
+PUBLISHED_POOLS: Dict[str, Any] = {name: globals()[name] for name in POOL_FIELDS}
+POOLS: Dict[str, Dict[str, Any]] = {
+    "published": PUBLISHED_POOLS,
+    "heldout": HELDOUT_POOLS,
+}
+
+
+def select_pools(name: str) -> None:
+    """Rebind the module-level value pools to the named set.
+
+    ``SLOT_POOLS`` and ``_structured_items`` read the pool constants through
+    module globals, so rebinding is enough to change what ``build`` renders.
+    """
+    if name not in POOLS:
+        raise ValueError(f"unknown pool set {name!r}; choose from {sorted(POOLS)}")
+    for field_name, value in POOLS[name].items():
+        globals()[field_name] = value
+
+
 # Templates: {slot} markers are replaced and their offsets recorded.
 TEMPLATES: Dict[str, Dict[str, List[str]]] = {
     "en": {
@@ -485,10 +623,18 @@ INLINE_TRUTH: Dict[str, List[Tuple[str, str]]] = {
 
 
 def build(
-    per_template: int = 6, languages: Optional[Iterable[str]] = None
+    per_template: int = 6,
+    languages: Optional[Iterable[str]] = None,
+    pools: str = "published",
+    seed: Optional[int] = None,
 ) -> List[Item]:
-    """Generate the corpus. Deterministic for a fixed SEED."""
-    rng = random.Random(SEED)
+    """Generate the corpus. Deterministic for a fixed seed and pool set.
+
+    ``pools="heldout"`` renders the same templates with values the published
+    corpus never contains; ``seed`` defaults to ``SEED``.
+    """
+    select_pools(pools)
+    rng = random.Random(SEED if seed is None else seed)
     langs = list(languages or LANGUAGES)
     items: List[Item] = []
     counter = 0
