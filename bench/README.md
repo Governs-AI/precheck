@@ -15,6 +15,7 @@ venv/bin/python -m bench.run                          # all arms, English only
 PRESIDIO_LANGUAGES=en,es,fr,de,zh venv/bin/python -m bench.run --arms regex legacy fixed
 venv/bin/python -m bench.run --json results.json      # machine-readable
 venv/bin/python -m bench.corpus                       # write corpus.jsonl and print counts
+venv/bin/python -m bench.run --pools heldout          # same templates, values the fixes never saw
 ```
 
 Non-English arms need the matching spaCy models:
@@ -70,6 +71,34 @@ PERSON and LOCATION went from 100% leakage to 11.6% and 11.7%. The
 high-sensitivity figure is the one to watch: it covers the entity families that
 regulated customers are buying redaction for, and 89.1% of them used to pass
 through untouched.
+
+## Held-out pools
+
+The published corpus draws every slot from small fixed pools (five names and
+three addresses per language, three cards, and so on): 630 spans over 110
+distinct values. Reseeding reshuffles those same values, so it is not a
+held-out set. `--pools heldout` swaps every pool for values absent from the
+published corpus (Luhn-valid cards, mod-97 IBANs, NPI/DEA check digits, fresh
+names and addresses per language). Templates and the inline partial/obfuscated
+tiers are unchanged. `tests/test_bench_corpus_pools.py` asserts the two pool
+sets are disjoint and the checksums valid.
+
+Five languages, `--pools heldout --seed 20261005` (the run reported in the
+CLEA 2026 camera-ready), 2026-10-05, Apple M4 Pro, presidio-analyzer 2.2.364,
+spaCy 3.8.16 small models:
+
+| Arm | leakage | high-sensitivity | over-redaction |
+|---|---|---|---|
+| `legacy` | 49.8% (314/630) | 89.1% (294/330) | 0.0% |
+| `fixed` | 11.9% (75/630) | **18.2% (60/330)** | 0.0% |
+
+With the default seed the same pools give `fixed` 11.3% / 17.0% (56/330): the
+seed changes which value lands in which template, not the values.
+
+The gap to the published run (high-sensitivity leakage 10.6%) is almost
+entirely Chinese `PERSON`: 3 of 43 unseen Chinese names are caught, against
+88% or better for every other language. The published Chinese figure reflects
+the five names in that corpus rather than the model.
 
 ## Known residual gaps
 
