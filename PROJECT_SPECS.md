@@ -642,6 +642,12 @@ The policy evaluation system follows a strict precedence hierarchy (highest to l
      out of PERSON spans.
    - `StreetAddressRecognizer`: format-based street addresses for en/es/fr/de/zh,
      registered for every language pipeline.
+   - A language name (`LANGUAGE_NAMES`) used as a language ("in French", "into
+     Spanish and Italian") is not NRP; nationality and religion still are.
+   - `GIVEN_NAME_PLACES` (Jordan, Georgia, Charlotte, …): in a person position
+     (subject of a human action, after "Ask/Hi") they become PERSON, even when
+     spaCy found nothing; in a place position ("in Jordan", "our Austin
+     office") they are treated as places.
    - Measured in `bench/` (tiers `clean_context`, `context`): over-redaction
      went from 25.7% to 0.9% and catch rate from 92.7% to 93.6%, with no
      newly leaked value. See `bench/README.md`.
@@ -1170,6 +1176,11 @@ curl -X POST http://localhost:8080/api/v1/postcheck \
 ```
 
 ## Recent Changes Log
+- **2026-10-25**: **PII precision follow-up (V2.18).** Languages used as
+  languages are no longer redacted as NRP, and given names that are also
+  places ("Jordan approved…", "Charlotte signed…") are redacted as PERSON
+  again. Bench (597 items): over-redaction 4.5% → 0.0%, catch rate
+  92.3% → 93.7%, PERSON leakage 13.3% → 9.9%, 0 newly leaked values.
 - **2026-10-25**: **PII precision (V2.14).** Place names and sentence-initial
   command words are no longer redacted: `refine_ner_results` keeps a bare
   LOCATION only in residence/address context and trims `NOT_A_NAME` words from

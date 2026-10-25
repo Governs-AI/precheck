@@ -112,7 +112,7 @@ def test_bench_regression_tiers_english():
     items = [i for i in build(languages=["en"]) if i.tier in CLEAN_TIERS | {"context"}]
     clean = [i for i in items if i.tier in CLEAN_TIERS]
     modified = [i.text for i in clean if redact(i.text) != i.text]
-    assert len(modified) <= 1, modified  # "…into Spanish and Italian": NRP
+    assert modified == []
 
     leaked = [
         (i.text, s.value)
@@ -122,3 +122,48 @@ def test_bench_regression_tiers_english():
         if s.value in redact(i.text)
     ]
     assert leaked == []
+
+
+# --- V2.18: languages, and given names that are also places ------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Translate the onboarding guide into Spanish and Italian.",
+        "Reply to the customer in French.",
+        "Translate this from Japanese to Korean.",
+        "Write the summary in German and Portuguese.",
+        "Revenue in Jordan grew four percent last year.",
+        "Our Austin office closes at five on Fridays.",
+        "France announced new tariffs on steel.",
+        "Florence is beautiful in spring.",
+    ],
+)
+def test_languages_and_places_used_as_such_are_left_alone(text):
+    assert redact(text) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["The Italian team ships Monday.", "She is a devout Catholic."],
+)
+def test_nationality_and_religion_are_still_redacted(text):
+    assert "<USER_NRP>" in redact(text)
+
+
+@pytest.mark.parametrize(
+    "text, name",
+    [
+        ("Jordan approved the budget.", "Jordan"),
+        ("Georgia signed the contract yesterday.", "Georgia"),
+        ("Charlotte signed the NDA yesterday.", "Charlotte"),
+        ("Ask Victoria to review the Berlin contract.", "Victoria"),
+        ("Hi Charlotte, the Tokyo deck is attached.", "Charlotte"),
+        ("Jordan will approve the plan on Monday.", "Jordan"),
+    ],
+)
+def test_given_names_read_as_places_are_redacted(text, name):
+    out = redact(text)
+    assert name not in out
+    assert "<USER_NAME>" in out

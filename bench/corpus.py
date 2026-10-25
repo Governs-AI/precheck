@@ -508,10 +508,14 @@ CITIES = {
     "zh": ["成都", "杭州", "南京"],
 }
 
+# Given names that are also place names, which spaCy often tags LOCATION.
+NAME_PLACES = ["Jordan", "Georgia", "Austin", "Victoria", "Charlotte"]
+
 CONTEXT_SLOTS = {
     "CITY": lambda rng, lang: rng.choice(CITIES[lang]),
+    "NAME_PLACE": lambda rng, lang: rng.choice(NAME_PLACES),
 }
-CONTEXT_TYPES = {"CITY": "LOCATION"}
+CONTEXT_TYPES = {"CITY": "LOCATION", "NAME_PLACE": "PERSON"}
 
 CONTEXT_TEMPLATES: Dict[str, Dict[str, List[str]]] = {
     "en": {
@@ -528,6 +532,13 @@ CONTEXT_TEMPLATES: Dict[str, Dict[str, List[str]]] = {
             "Schedule the review with the Madrid and Lisbon teams.",
             "Call out the risks for the Europe and Asia rollout.",
             "Message the Chicago team when the Dublin build is green.",
+            # V2.18: languages, and places that act like places
+            "Reply to the customer in French.",
+            "Translate this from Japanese to Korean.",
+            "Write the summary in German and Portuguese.",
+            "Revenue in Jordan grew four percent last year.",
+            "Our Austin office closes at five on Fridays.",
+            "France announced new tariffs on steel.",
         ],
         "context": [
             "Email {PERSON} the France launch plan by Friday.",
@@ -536,6 +547,11 @@ CONTEXT_TEMPLATES: Dict[str, Dict[str, List[str]]] = {
             "Deliver the contract to {LOCATION} before the Tokyo trip.",
             "Remind {PERSON} that the Berlin summit starts Monday.",
             "The customer moved to {CITY}; send the forms to {LOCATION}.",
+            # V2.18: given names spaCy reads as places
+            "{NAME_PLACE} approved the budget for the Paris office.",
+            "Ask {NAME_PLACE} to review the Berlin contract.",
+            "{NAME_PLACE} signed the NDA yesterday.",
+            "Hi {NAME_PLACE}, the Tokyo deck is attached.",
         ],
     },
     "es": {

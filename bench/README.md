@@ -37,14 +37,15 @@ identifiers), `partial` (last-4, initials, year-only DOB), `obfuscated` (spaced,
 spelled-out), `structured` (PII nested in JSON tool arguments at depth 1–4), and
 `clean` (no PII at all — the over-redaction control).
 
-**Precision regression cases (V2.14).** 129 more items, generated with their
-own RNG and appended, so the original 438 are byte-identical
+**Precision regression cases (V2.14, V2.18).** 159 more items, generated with
+their own RNG and appended, so the original 438 are byte-identical
 (`--no-regression` runs the original set alone):
 
-- `clean_context`: 27 PII-free prompts that spaCy mislabels: countries and
-  cities ("Summarise the release notes for France and Germany") and
-  sentence-initial command words ("Email the report…", "Payment terms…").
-  Counted in `over_redact`.
+- `clean_context`: 33 PII-free prompts that spaCy mislabels: countries and
+  cities ("Summarise the release notes for France and Germany"),
+  sentence-initial command words ("Email the report…", "Payment terms…"),
+  languages ("Reply … in French") and places that double as names ("Revenue
+  in Jordan grew", "Our Austin office"). Counted in `over_redact`.
 - `context`: 102 items of real PII next to the same words, the other side of
   the trade-off: names after command words, street addresses with no
   residence cue, and a city when it says where someone lives ("lives in
@@ -116,10 +117,40 @@ their street.
 Per value, no PII value that was caught before leaks after: leaked values went
 from 55 to 48, with 0 newly leaked. PERSON leakage is unchanged at 10.4%.
 
-The one remaining over-redaction is "…into Spanish and Italian": spaCy tags
-the language as NRP. A single first name that spaCy tags as a place
-("Jordan approved the budget") is no longer redacted. Before the fix it was
-redacted only because spaCy treated it as a place.
+### V2.18 — languages and given names that are also places (2026-10-25)
+
+Two leftovers from V2.14:
+
+- Language names were redacted as NRP ("…into Italian").
+- Given names that are also places had stopped being redacted once bare
+  places were let through ("Jordan approved the budget").
+
+The fixes:
+
+- A language name (`LANGUAGE_NAMES`) after "in/into/to/from …", or before
+  "translation/version/…", is no longer redacted. Nationality and religion
+  ("the Italian team", "a devout Catholic") still are.
+- A `GIVEN_NAME_PLACES` word in a person position is treated as a name. That
+  means the subject of a human action ("approved", "signed", "will review") or
+  the word after "Ask/Tell/Hi". It applies even where spaCy found nothing.
+- The same word in a place position ("in Jordan", "our Austin office") is
+  treated as a place.
+
+`fixed` arm, five languages, 597 items (V2.18 cases included in both columns):
+
+| | before | after |
+|---|---|---|
+| catch rate | 92.3% | **93.7%** |
+| high-sensitivity catch | 91.1% | **93.3%** |
+| over-redaction (PII-free tiers) | 4.5% | **0.0%** |
+| clean_context over-redaction | 15.2% | **0.0%** |
+| context-tier leakage | 9.9% | **3.1%** |
+| PERSON leakage | 13.3% | **9.9%** |
+
+The original 438-item corpus is unchanged (92.9% catch rate, 0% over-redaction).
+Per value, leaked values went from 60 to 49, with 0 newly leaked. The
+context-tier values still leaking are spaCy misses on French and Chinese names
+that leaked before this change too.
 
 ## Known residual gaps
 

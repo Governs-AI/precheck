@@ -12,6 +12,7 @@ from presidio_analyzer import (
     Pattern,
     PatternRecognizer,
     RecognizerRegistry,
+    RecognizerResult,
 )
 from presidio_analyzer.nlp_engine import SpacyNlpEngine
 from presidio_analyzer.predefined_recognizers import (
@@ -496,11 +497,101 @@ def _trim_not_a_name(text: str, start: int, end: int) -> Optional[Tuple[int, int
     return words[0][0], words[-1][1]
 
 
+# Language names spaCy tags NRP. Used as a language ("reply in French",
+# "translate into Spanish and Italian") they say nothing about a person, so
+# they are not redacted there. Nationality, religion and political group
+# elsewhere ("the Italian team", "a devout Catholic") stay redacted.
+LANGUAGE_NAMES = {
+    "english", "spanish", "french", "german", "italian", "portuguese", "dutch",
+    "japanese", "korean", "chinese", "mandarin", "cantonese", "arabic", "hindi",
+    "bengali", "urdu", "russian", "polish", "turkish", "swedish", "norwegian",
+    "danish", "finnish", "greek", "hebrew", "thai", "vietnamese", "indonesian",
+    "malay", "ukrainian", "czech", "romanian", "hungarian", "persian", "farsi",
+    "tagalog", "swahili",
+    # es / fr / de
+    "inglés", "español", "francés", "alemán", "italiano", "portugués",
+    "anglais", "espagnol", "français", "allemand", "italien", "portugais",
+    "englisch", "spanisch", "französisch", "deutsch", "italienisch",
+}  # fmt: skip
+
+# "in French", "into Spanish and Italian", "from Japanese to Korean", "al inglés"
+_LANGUAGE_BEFORE = re.compile(
+    r"\b(?:in|into|to|from|en|al|vers|auf|ins|nach)\s+"
+    r"(?:[^\s,;.]+\s*(?:,|\band\b|\bor\b|\by\b|\bet\b|\bund\b)\s*)*$",
+    re.IGNORECASE,
+)
+_LANGUAGE_AFTER = re.compile(
+    r"^\s+(?:translation|version|subtitles|speakers?|language|copy|text)\b",
+    re.IGNORECASE,
+)
+
+# Given names that are also place names. spaCy reads "Jordan approved the
+# budget" as the country, or finds nothing in "Charlotte signed the NDA". In a
+# person position (subject of a human action, or after "Ask"/"Hi") they are
+# names; in a place position ("in Jordan", "our Austin office") they are not.
+GIVEN_NAME_PLACES = {
+    "jordan", "georgia", "austin", "victoria", "charlotte", "florence",
+    "chelsea", "sydney", "dallas", "savannah", "madison", "brooklyn",
+    "phoenix", "dakota", "aurora", "houston", "denver", "lincoln", "jackson",
+    "orlando", "kingston", "raleigh", "adelaide", "alexandria", "augusta",
+    "virginia", "carolina", "india", "kenya", "regina", "eugene", "chester",
+}  # fmt: skip
+
+_HUMAN_ACTION = (
+    r"approved?|signed?|said|says|asked|asks|wrote|writes|emailed|called|texted|"
+    r"replied|confirmed|agreed|reviewed?|joined|resigned|mentioned|told|thinks|"
+    r"thought|wants|needs|sent|booked|scheduled|cancell?ed|left|quit|approve|"
+    r"sign|reply|confirm|call|email|send|join|is\s+out|is\s+on\s+leave"
+)
+_PERSON_AFTER = re.compile(
+    r"^\s*,?\s*(?:and\s+[A-Z][\w'-]+\s+)?"
+    r"(?:(?:will|would|can|could|should|must|may|might|just|has|had)\s+)?"
+    rf"(?:{_HUMAN_ACTION})\b"
+)
+_PERSON_BEFORE = re.compile(
+    r"\b(?:ask|tell|cc|ping|email|call|message|remind|thank|thanks|dear|hi|"
+    r"hello|hey|invite)\s+$",
+    re.IGNORECASE,
+)
+_PLACE_BEFORE = re.compile(r"\b(?:in|at|to|near|via|from|of)\s+$", re.IGNORECASE)
+_PLACE_AFTER = re.compile(
+    r"^\s+(?:office|team|branch|campus|airport|store|site|headquarters|hq|"
+    r"plant|warehouse|data\s+cent(?:er|re)|region|area|market|launch)\b",
+    re.IGNORECASE,
+)
+_CAPITALISED = re.compile(r"\b[A-Z][a-z]+\b")
+
+
+def _name_place_role(text: str, start: int, end: int) -> Optional[str]:
+    """'person' or 'place' for a GIVEN_NAME_PLACES word, None if unclear/not one."""
+    if text[start:end].lower() not in GIVEN_NAME_PLACES:
+        return None
+    before, after = text[:start], text[end:]
+    if _PLACE_BEFORE.search(before) or _PLACE_AFTER.match(after):
+        return "place"
+    if _PERSON_BEFORE.search(before) or _PERSON_AFTER.match(after):
+        return "person"
+    return None
+
+
+def _person(start: int, end: int, like: Any = None) -> Any:
+    """A PERSON finding, shaped like spaCy's so later filters treat it alike."""
+    return RecognizerResult(
+        entity_type="PERSON",
+        start=start,
+        end=end,
+        score=getattr(like, "score", 0.85),
+        recognition_metadata={"recognizer_name": "NamePlaceRule"},
+    )
+
+
 def refine_ner_results(text: str, results: List[Any]) -> List[Any]:
     """Apply the precision rules above to analyzer output.
 
     Only findings from the spaCy NER model are touched; pattern recognizers
-    (emails, cards, street addresses, …) pass through unchanged.
+    (emails, cards, street addresses, …) pass through unchanged. Given names
+    that are also places get a PERSON finding in a person position even when
+    spaCy found nothing there.
     """
     refined: List[Any] = []
     for r in results:
@@ -509,14 +600,31 @@ def refine_ner_results(text: str, results: List[Any]) -> List[Any]:
             refined.append(r)
             continue
 
+        role = _name_place_role(text, r.start, r.end)
+
         if r.entity_type == "PERSON":
+            if role == "place":
+                continue  # "our Austin office"
             trimmed = _trim_not_a_name(text, r.start, r.end)
             if trimmed is not None:
                 r.start, r.end = trimmed
                 refined.append(r)
             continue
 
+        if r.entity_type == "NRP":
+            value = text[r.start : r.end].lower()
+            if value in LANGUAGE_NAMES and (
+                _LANGUAGE_BEFORE.search(text[: r.start])
+                or _LANGUAGE_AFTER.match(text[r.end :])
+            ):
+                continue  # used as a language
+            refined.append(r)
+            continue
+
         if r.entity_type == "LOCATION":
+            if role == "person":
+                refined.append(_person(r.start, r.end, like=r))  # "Jordan approved…"
+                continue
             if any(ch.isdigit() for ch in text[r.start : r.end]):
                 refined.append(r)
                 continue
@@ -536,6 +644,13 @@ def refine_ner_results(text: str, results: List[Any]) -> List[Any]:
             continue
 
         refined.append(r)
+
+    # Name-places spaCy missed entirely ("Charlotte signed the NDA").
+    for m in _CAPITALISED.finditer(text):
+        if _name_place_role(text, m.start(), m.end()) != "person":
+            continue
+        if not any(r.start < m.end() and m.start() < r.end for r in refined):
+            refined.append(_person(m.start(), m.end()))
     return refined
 
 
