@@ -1031,7 +1031,7 @@ dependencies = [
     "presidio-anonymizer>=2.2.0",
     "spacy>=3.7.0",
     "phonenumbers>=8.13.0",
-    "sqlalchemy>=2.0.0",
+    "sqlalchemy>=2.0.0,<2.1",
     "psycopg2-binary>=2.9.0",
     "redis>=5.0.0",
     "python-multipart>=0.0.6",
@@ -1176,6 +1176,12 @@ curl -X POST http://localhost:8080/api/v1/postcheck \
 ```
 
 ## Recent Changes Log
+- **2026-10-25**: **Pin SQLAlchemy below 2.1.** SQLAlchemy 2.1 maps
+  `postgresql://` to the psycopg 3 driver, but the image ships psycopg2, so a
+  fresh image build crashed at import (`No module named 'psycopg'`) and the
+  Render deploy of main failed. Pinned `sqlalchemy>=2.0.0,<2.1` in
+  `requirements.txt` and `pyproject.toml`; verified the image starts and serves
+  under a 512 MB limit with `DEBUG=false`.
 - **2026-10-25**: **PII precision follow-up (V2.18).** Languages used as
   languages are no longer redacted as NRP, and given names that are also
   places ("Jordan approved…", "Charlotte signed…") are redacted as PERSON
