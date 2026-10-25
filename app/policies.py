@@ -864,6 +864,54 @@ def is_denied_tool(tool: str, deny_tools: Optional[List[str]] = None) -> bool:
     return False
 
 
+def is_listed_tool(tool: str, tools: Optional[List[str]]) -> bool:
+    """Whether `tool` is named by an allow-style list.
+
+    Stricter than `is_denied_tool`: an allow entry widens what may run, so it
+    only matches the exact (normalised) name or an explicit `ns.*` wildcard.
+    """
+    normalized = normalize_tool_name(tool)
+    if not normalized or not tools:
+        return False
+    for raw_entry in tools:
+        entry = normalize_tool_name(raw_entry if isinstance(raw_entry, str) else "")
+        if not entry:
+            continue
+        if entry.endswith(".*"):
+            prefix = entry[:-2]
+            if normalized == prefix or normalized.startswith(f"{prefix}."):
+                return True
+        elif normalized == entry:
+            return True
+    return False
+
+
+# The dashboard policy UI speaks allow/block/redact/tokenize/confirm; the
+# evaluator historically spoke pass_through/deny/... Both are accepted
+# everywhere and folded to the evaluator's form here.
+_ACTION_ALIASES = {
+    "allow": "pass_through",
+    "pass": "pass_through",
+    "pass_through": "pass_through",
+    "passthrough": "pass_through",
+    "block": "deny",
+    "deny": "deny",
+    "redact": "redact",
+    "tokenize": "tokenize",
+    "confirm": "confirm",
+}
+
+
+def normalize_action(action: Any, default: Optional[str] = "redact") -> Optional[str]:
+    """Fold a policy action to pass_through|deny|redact|tokenize|confirm.
+
+    Unknown or missing actions return `default` rather than guessing.
+    """
+    if not isinstance(action, str):
+        return default
+    return _ACTION_ALIASES.get(action.strip().lower(), default)
+
+
 def redact_obj(
     obj: Any, reasons: Optional[Set[str]] = None, field_name: str = ""
 ) -> Tuple[Any, Set[str]]:
@@ -1221,7 +1269,8 @@ def _evaluate_policy(
             redacted_text, reasons = anonymize_text_regex(raw_text)
         reasons = sorted(list(reasons))
         return {
-            "decision": "transform",
+            # Nothing detected means nothing transformed.
+            "decision": "transform" if redacted_text != raw_text else "allow",
             "raw_text_out": redacted_text,
             "reasons": reasons or None,
             "policy_id": "net-redact-presidio" if USE_PRESIDIO else "net-redact-regex",
@@ -1247,31 +1296,35 @@ def evaluate_with_payload_policy(
 ) -> Dict:
     """
     Evaluate policy with the following precedence (ADR-005):
-      1. Payload `policy_config` if provided (backwards-compatible)
-      2. Dashboard-managed policy fetched by `org_id` from the shared DB
+      1. Dashboard-managed policy fetched by `org_id` from the shared DB
+      2. Payload `policy_config`, only when the org has no active policy
       3. Static YAML policy (legacy fallback)
+
+    The org's own policy must win: a caller holding an API key could
+    otherwise send a permissive `policy_config` and opt out of governance.
     """
 
-    if policy_config:
+    org_policy = None
+    if org_id:
+        try:
+            from .policy_source import get_active_policy
+
+            org_policy = get_active_policy(org_id)
+        except Exception as exc:  # never break the request path on a fetcher bug
+            org_policy = None
+            # Use module logger; import is local to avoid circular load risk.
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "policy_source fetch failed for org=%s err=%s", org_id, exc
+            )
+
+    if org_policy:
+        resolved_policy_config = deepcopy(org_policy)
+    elif policy_config:
         resolved_policy_config = deepcopy(policy_config)
     else:
-        org_policy = None
-        if org_id:
-            try:
-                from .policy_source import get_active_policy
-
-                org_policy = get_active_policy(org_id)
-            except Exception as exc:  # never break the request path on a fetcher bug
-                org_policy = None
-                # Use module logger; import is local to avoid circular load risk.
-                import logging as _logging
-
-                _logging.getLogger(__name__).warning(
-                    "policy_source fetch failed for org=%s err=%s", org_id, exc
-                )
-        resolved_policy_config = (
-            deepcopy(org_policy) if org_policy else deepcopy(get_policy())
-        )
+        resolved_policy_config = deepcopy(get_policy())
     resolved_policy_config["tool"] = tool
     resolved_policy_config["scope"] = scope or ""
 
@@ -1313,6 +1366,11 @@ def _evaluate_dynamic_policy(
                 "ts": now,
             }
 
+        # Tools the org explicitly allowed are exempt from a default
+        # block/confirm posture (PII handling still applies), which makes
+        # "default block + allow_tools" a plain allowlist.
+        explicitly_allowed = is_listed_tool(tool, policy_config.get("allow_tools"))
+
         # PRECEDENCE LEVEL 2: Tool-specific access rules
         tool_access = policy_config.get("tool_access", {})
 
@@ -1352,7 +1410,17 @@ def _evaluate_dynamic_policy(
 
         # PRECEDENCE LEVEL 3: Global defaults for this direction
         defaults = policy_config.get("defaults", {})
-        default_action = defaults.get(direction, {}).get("action", "redact")
+        direction_defaults = defaults.get(direction, {})
+        default_action = normalize_action(
+            (
+                direction_defaults.get("action")
+                if isinstance(direction_defaults, dict)
+                else None
+            ),
+            "redact",
+        )
+        if explicitly_allowed and default_action in ("deny", "confirm"):
+            default_action = "redact"
         return _apply_default_action_dynamic(
             default_action,
             raw_text,
@@ -1429,10 +1497,130 @@ def _apply_tool_specific_policy_dynamic(
     policy_config: Optional[Dict] = None,
     budget_context: Optional[Dict] = None,
 ) -> Dict:
-    """Apply tool-specific policy using dynamic configuration"""
+    """Apply a tool-specific rule.
 
-    # Run PII detection on raw text
-    findings = []
+    The rule's `action` decides the request:
+      - block   → deny, whatever the text contains
+      - confirm → confirm (a budget overrun still denies)
+      - allow / redact / tokenize → how detected PII is treated, unless
+        `allow_pii` overrides a type; a type set to block denies.
+    With no PII detected, allow/redact/tokenize all allow the request.
+    """
+    has_budget = bool(user_id and tool_config and policy_config and budget_context)
+    action = normalize_action(tool_policy.get("action"), None)
+
+    if action == "deny":
+        return {
+            "decision": "deny",
+            "raw_text_out": raw_text,
+            "reasons": ["tool-specific.block"],
+            "policy_id": "tool-access",
+            "ts": now,
+        }
+
+    if action == "confirm":
+        # Budget overrides confirm
+        if has_budget:
+            budget_result = _check_budget_and_apply(
+                user_id,
+                tool,
+                raw_text,
+                tool_config,
+                policy_config,
+                budget_context,
+                now,
+            )
+            if budget_result:
+                return budget_result
+
+        result = {
+            "decision": "confirm",
+            "raw_text_out": raw_text,
+            "reasons": ["tool-specific.confirm"],
+            "policy_id": "tool-access",
+            "ts": now,
+        }
+        if has_budget:
+            result = _add_budget_info_to_result(
+                result,
+                user_id,
+                tool,
+                raw_text,
+                tool_config,
+                policy_config,
+                budget_context,
+            )
+        return result
+
+    findings = _detect_pii_findings(raw_text, tool_config, policy_config)
+
+    if findings:
+        allow_pii = tool_policy.get("allow_pii", {}) or {}
+        pii_default = (
+            action if action in ("pass_through", "tokenize", "redact") else "redact"
+        )
+
+        # Any PII type set to block denies the entire request
+        for finding in findings:
+            pii_type = finding["type"]
+            if normalize_action(allow_pii.get(pii_type), pii_default) == "deny":
+                return {
+                    "decision": "deny",
+                    "raw_text_out": raw_text,
+                    "reasons": [f"pii.blocked:{pii_type.replace('PII:', '')}"],
+                    "policy_id": "tool-access",
+                    "ts": now,
+                }
+
+        transformed_text, tool_reasons = apply_tool_access_text_dynamic(
+            tool, findings, raw_text, allow_pii, pii_default
+        )
+        return {
+            "decision": "transform" if transformed_text != raw_text else "allow",
+            "raw_text_out": transformed_text,
+            "reasons": tool_reasons,
+            "policy_id": "tool-access",
+            "ts": now,
+        }
+
+    # No PII found: allow - but check budget first if user_id provided
+    result = {
+        "decision": "allow",
+        "raw_text_out": raw_text,
+        "policy_id": "tool-access",
+        "ts": now,
+    }
+    if has_budget:
+        budget_result = _check_budget_and_apply(
+            user_id,
+            tool,
+            raw_text,
+            tool_config,
+            policy_config,
+            budget_context,
+            now,
+        )
+        if budget_result:
+            return budget_result
+        result = _add_budget_info_to_result(
+            result,
+            user_id,
+            tool,
+            raw_text,
+            tool_config,
+            policy_config,
+            budget_context,
+        )
+    return result
+
+
+def _detect_pii_findings(
+    raw_text: str,
+    tool_config: Optional[Dict] = None,
+    policy_config: Optional[Dict] = None,
+) -> List[Dict]:
+    """Detect PII spans with Presidio, or the regex detectors when it is off."""
+    findings: List[Dict] = []
     if USE_PRESIDIO and ANALYZER is not None:
         results = analyze_text(
             raw_text, language=language_hint(tool_config, policy_config)
@@ -1448,170 +1636,54 @@ def _apply_tool_specific_policy_dynamic(
                         "text": raw_text[r.start : r.end],
                     }
                 )
-    else:
-        # Detect SSNs with context first so generic phone regexes cannot claim
-        # the same span before tokenization rules get a chance to run.
-        import re
+        return findings
 
-        ssn_patterns = [
-            r"\b\d{3}-\d{2}-\d{4}\b",  # XXX-XX-XXXX with dashes
-            r"\b(?!000|666|9\d{2})\d{3}[-]?(?!00)\d{2}[-]?(?!0000)\d{4}\b",  # With optional dashes
-            r"\b(?!000|666|9\d{2})\d{9}\b",  # 9 digits without dashes (if context suggests SSN)
-        ]
+    # Detect SSNs with context first so generic phone regexes cannot claim
+    # the same span before tokenization rules get a chance to run.
+    import re
 
-        ssn_context = re.search(
-            r"\b(ssn|social\s*security|tax\s*id|social\s*security\s*number)\b",
-            raw_text,
-            re.IGNORECASE,
-        )
+    ssn_patterns = [
+        r"\b\d{3}-\d{2}-\d{4}\b",  # XXX-XX-XXXX with dashes
+        r"\b(?!000|666|9\d{2})\d{3}[-]?(?!00)\d{2}[-]?(?!0000)\d{4}\b",  # With optional dashes
+        r"\b(?!000|666|9\d{2})\d{9}\b",  # 9 digits without dashes (if context suggests SSN)
+    ]
 
-        for pattern in ssn_patterns:
-            for match in re.finditer(pattern, raw_text):
-                if not ssn_context and "-" not in match.group():
-                    continue
-                if _has_overlap(match.start(), match.end(), findings):
-                    continue
-                findings.append(
-                    {
-                        "type": "PII:us_ssn",
-                        "start": match.start(),
-                        "end": match.end(),
-                        "score": 0.9 if ssn_context else 0.7,
-                        "text": match.group(),
-                    }
-                )
-                break
+    ssn_context = re.search(
+        r"\b(ssn|social\s*security|tax\s*id|social\s*security\s*number)\b",
+        raw_text,
+        re.IGNORECASE,
+    )
 
-        for finding in detect_regex_pii_findings(raw_text):
-            if _has_overlap(finding["start"], finding["end"], findings):
+    for pattern in ssn_patterns:
+        for match in re.finditer(pattern, raw_text):
+            if not ssn_context and "-" not in match.group():
                 continue
-            findings.append(finding)
-
-    # Apply tool-specific transformations based on findings and allow_pii rules
-    if findings:
-        allow_pii = tool_policy.get("allow_pii", {})
-
-        # Check if any PII type is set to "block" - if so, deny the entire request
-        for finding in findings:
-            pii_type = finding["type"]
-            action = allow_pii.get(pii_type, "redact")
-            if action == "block" or action == "deny":
-                return {
-                    "decision": "deny",
-                    "raw_text_out": raw_text,
-                    "reasons": [f"pii.blocked:{pii_type.replace('PII:', '')}"],
-                    "policy_id": "tool-access",
-                    "ts": now,
+            if _has_overlap(match.start(), match.end(), findings):
+                continue
+            findings.append(
+                {
+                    "type": "PII:us_ssn",
+                    "start": match.start(),
+                    "end": match.end(),
+                    "score": 0.9 if ssn_context else 0.7,
+                    "text": match.group(),
                 }
+            )
+            break
 
-        # No blocking actions, apply transformations
-        transformed_text, tool_reasons = apply_tool_access_text_dynamic(
-            tool, findings, raw_text, allow_pii
-        )
-        return {
-            "decision": "transform",
-            "raw_text_out": transformed_text,
-            "reasons": tool_reasons,
-            "policy_id": "tool-access",
-            "ts": now,
-        }
-    else:
-        # No PII found, check if tool has default action override
-        action = tool_policy.get("action")
-        if action == "deny" or action == "block":
-            # Budget check not needed for deny/block actions
-            return {
-                "decision": "deny",
-                "raw_text_out": raw_text,
-                "reasons": ["tool-specific.block"],
-                "policy_id": "tool-access",
-                "ts": now,
-            }
-        elif action == "tokenize":
-            tokenized_text = tokenize(raw_text)
-            return {
-                "decision": "transform",
-                "raw_text_out": tokenized_text,
-                "reasons": ["tool-specific.tokenize"],
-                "policy_id": "tool-access",
-                "ts": now,
-            }
-        elif action == "confirm":
-            # Check budget first - budget overrides confirm
-            if user_id and tool_config and policy_config and budget_context:
-                budget_result = _check_budget_and_apply(
-                    user_id,
-                    tool,
-                    raw_text,
-                    tool_config,
-                    policy_config,
-                    budget_context,
-                    now,
-                )
-                if budget_result:
-                    return budget_result
-
-            # If budget check passed, return confirm
-            result = {
-                "decision": "confirm",
-                "raw_text_out": raw_text,
-                "reasons": ["tool-specific.confirm"],
-                "policy_id": "tool-access",
-                "ts": now,
-            }
-
-            # Add budget info if available
-            if user_id and tool_config and policy_config and budget_context:
-                result = _add_budget_info_to_result(
-                    result,
-                    user_id,
-                    tool,
-                    raw_text,
-                    tool_config,
-                    policy_config,
-                    budget_context,
-                )
-
-            return result
-        else:
-            # Default: pass through - but check budget first if user_id provided
-            result = {
-                "decision": "allow",
-                "raw_text_out": raw_text,
-                "policy_id": "tool-access",
-                "ts": now,
-            }
-
-            # Check budget if user_id and tool_config provided
-            if user_id and tool_config and policy_config and budget_context:
-                budget_result = _check_budget_and_apply(
-                    user_id,
-                    tool,
-                    raw_text,
-                    tool_config,
-                    policy_config,
-                    budget_context,
-                    now,
-                )
-                if budget_result:
-                    return budget_result
-                else:
-                    # Add budget info to the result
-                    result = _add_budget_info_to_result(
-                        result,
-                        user_id,
-                        tool,
-                        raw_text,
-                        tool_config,
-                        policy_config,
-                        budget_context,
-                    )
-
-            return result
+    for finding in detect_regex_pii_findings(raw_text):
+        if _has_overlap(finding["start"], finding["end"], findings):
+            continue
+        findings.append(finding)
+    return findings
 
 
 def apply_tool_access_text_dynamic(
-    tool: str, findings: List[Dict], raw_text: str, allow_pii: Dict[str, str]
+    tool: str,
+    findings: List[Dict],
+    raw_text: str,
+    allow_pii: Dict[str, str],
+    default_action: str = "redact",
 ) -> Tuple[str, List[str]]:
     """Apply tool-specific text transformations using dynamic allow_pii rules"""
 
@@ -1627,8 +1699,8 @@ def apply_tool_access_text_dynamic(
         end = finding["end"]
         original_text = finding["text"]
 
-        # Check if this PII type is allowed for this tool
-        action = allow_pii.get(pii_type, "redact")  # Default to redact if not specified
+        # Per-type override, else the rule's own PII action
+        action = normalize_action(allow_pii.get(pii_type), default_action)
 
         if action == "pass_through":
             # Keep original text
@@ -1639,13 +1711,8 @@ def apply_tool_access_text_dynamic(
             token = tokenize(original_text)
             transformed = transformed[:start] + token + transformed[end:]
             reasons.extend(_tool_reason_codes("tokenized", pii_type))
-        elif action == "redact":
-            # Replace with placeholder
-            placeholder = f"[{pii_type.upper()}]"
-            transformed = transformed[:start] + placeholder + transformed[end:]
-            reasons.extend(_tool_reason_codes("redacted", pii_type))
-        elif action == "deny":
-            # This should be handled at a higher level, but just redact here
+        else:
+            # redact (and deny, which is handled at a higher level)
             placeholder = f"[{pii_type.upper()}]"
             transformed = transformed[:start] + placeholder + transformed[end:]
             reasons.extend(_tool_reason_codes("redacted", pii_type))
@@ -1697,6 +1764,26 @@ def _apply_default_action_dynamic(
             "policy_id": "defaults",
             "ts": now,
         }
+    elif action == "confirm":
+        if user_id and tool_config and policy_config and budget_context:
+            budget_result = _check_budget_and_apply(
+                user_id,
+                policy_config.get("tool", ""),
+                raw_text,
+                tool_config,
+                policy_config,
+                budget_context,
+                now,
+            )
+            if budget_result and budget_result["decision"] == "deny":
+                return budget_result
+        return {
+            "decision": "confirm",
+            "raw_text_out": raw_text,
+            "reasons": [f"default.{direction}.confirm"],
+            "policy_id": "defaults",
+            "ts": now,
+        }
 
     # PRECEDENCE LEVEL 4: Network scope redaction (net.* scopes or web.* tools)
     network_scopes = policy_config.get("network_scopes", ["net."])
@@ -1716,7 +1803,8 @@ def _apply_default_action_dynamic(
             redacted_text, reasons = anonymize_text_regex(raw_text)
         reasons = sorted(list(reasons))
         return {
-            "decision": "transform",
+            # Nothing detected means nothing transformed.
+            "decision": "transform" if redacted_text != raw_text else "allow",
             "raw_text_out": redacted_text,
             "reasons": reasons or None,
             "policy_id": "net-redact-presidio" if USE_PRESIDIO else "net-redact-regex",

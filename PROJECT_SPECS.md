@@ -70,66 +70,34 @@ first two needs a different class of detector, not a better pattern.
 - **File change detection**: Automatic reload when policy file is modified
 - **Global defaults**: Organization-wide policy stance configuration
 
-## Dynamic Policy Architecture
+## Policy Source Architecture (ADR-005)
 
-### Overview
-The precheck service now supports dynamic policy evaluation where policies are sent by the agent/client in the request payload, rather than being loaded from static YAML files. This enables real-time policy updates and user-specific policy management.
+### Where the policy comes from
+For every request precheck resolves exactly one policy, in this order:
 
-### Policy Payload Structure
-```json
-{
-  "tool": "send_email",
-  "raw_text": "Send email to john.doe@company.com with SSN 123-45-6789",
-  "scope": "net.external",
-  "corr_id": "req-12345",
-  
-  "policy_config": {
-    "version": "v1",
-    "defaults": {
-      "ingress": {"action": "redact"},
-      "egress": {"action": "redact"}
-    },
-    "tool_access": {
-      "send_email": {
-        "direction": "ingress",
-        "action": "redact",
-        "allow_pii": {
-          "PII:email_address": "pass_through",
-          "PII:us_ssn": "tokenize"
-        }
-      }
-    },
-    "deny_tools": ["python.exec", "bash.exec", "code.exec", "shell.exec"],
-    "network_scopes": ["net."],
-    "network_tools": ["web.", "http.", "fetch.", "request."],
-    "on_error": "block"
-  },
-  
-  "tool_config": {
-    "tool_name": "send_email",
-    "scope": "net.external",
-    "direction": "ingress",
-    "metadata": {
-      "category": "communication",
-      "risk_level": "medium"
-    }
-  }
-}
-```
+1. **The org's dashboard policy.** This is the highest-priority active row in the
+   dashboard's `Policy` table for the API key's `org_id`, cached in-process for
+   `POLICY_CACHE_TTL_S` (default 60s) and dropped by
+   `POST /api/v1/internal/policy/invalidate`.
+2. **Payload `policy_config`.** It is used *only* when the org has no active
+   dashboard policy. A caller can never override its org's policy, because that
+   would let any key holder opt out of governance.
+3. **Static YAML** (`policy.tool_access.yaml`), the legacy fallback.
 
-### Policy Evaluation Flow
-1. **Agent fetches policies** from database (user/org-specific)
-2. **Agent sends policies** in request payload to precheck service
-3. **Precheck evaluates** using payload policies (no database queries)
-4. **Precheck returns** decision with transformed text
-5. **Agent handles** the response and proceeds with tool execution
+`app/policy_source.py::_map_row_to_policy_config` translates a dashboard row into
+the evaluator's shape:
+- Both `defaults` shapes are accepted: `{"pii": action}` (v1 API) and
+  `{"ingress": {"action"}, "egress": {"action"}}` (policy UI). A
+  direction-specific entry beats the `pii` shorthand.
+- Actions are folded to one vocabulary by `normalize_action`.
+- The built-in code-exec denylist (`DEFAULT_DENY_TOOLS`) is always merged into
+  `deny_tools`. A listed tool is lifted only when it appears in `allow_tools`.
+- `_revision` = `id:updatedAt` keys the allow-decision cache, so a policy edit
+  can never be answered from a stale cached `allow`.
 
-### Benefits
-- **🚀 Performance**: No database queries in precheck service
-- **🔄 Real-time**: Policies updated instantly without service restart
-- **🔒 Security**: User/org-specific policies
-- **📈 Scalable**: Precheck service stays lightweight
-- **🔄 Backward Compatible**: Falls back to YAML if no payload provided
+### Policy Payload Structure (fallback only)
+The request body may still carry `policy_config` and `tool_config`, as
+documented in the OpenAPI spec. `budget_context` is always honoured.
 
 ## API Documentation
 
@@ -584,11 +552,25 @@ tool_access:
 
 ### Policy Actions
 
-- **`pass_through`**: Allow raw PII value to pass through unchanged
-- **`tokenize`**: Replace PII with stable token (e.g., `pii_8797942a`)
-- **`redact`**: Apply standard redaction (e.g., `<USER_EMAIL>`, `<USER_SSN>`)
-- **`deny`**: Block the request entirely
-- **`confirm`**: Require an approval/confirmation step before tool execution
+The dashboard and the evaluator share one vocabulary (aliases in brackets):
+
+- **`allow`** [`pass_through`]: let the value or request through unchanged
+- **`redact`**: replace detected PII with a placeholder (e.g. `<USER_EMAIL>`)
+- **`tokenize`**: replace detected PII with a stable token (e.g. `pii_8797942a`)
+- **`block`** [`deny`]: deny the request
+- **`confirm`**: return `confirm`; the caller must get approval before acting
+
+What an action means depends on where it is set:
+
+| Set on | `allow` | `redact` / `tokenize` | `block` | `confirm` |
+|---|---|---|---|---|
+| `defaults.<direction>` | allow request untouched | transform if PII found, else allow | deny every request | confirm every request |
+| `tool_access.<tool>.action` | PII passes through | transform if PII found, else allow | deny, PII or not | confirm, PII or not |
+| `tool_access.<tool>.allow_pii.<PII:type>` | that type passes | that type is redacted/tokenized | deny if that type appears | (treated as redact) |
+
+A tool in `allow_tools` is exempt from a default `block`/`confirm` and is
+redacted instead, so "default block + allow_tools" works as an allowlist.
+Explicit `deny_tools` still wins over `allow_tools`.
 
 ### Global Defaults
 
@@ -618,21 +600,21 @@ The policy evaluation system follows a strict precedence hierarchy (highest to l
 ### 2. **TOOL_SPECIFIC** (High Priority)
 - **Purpose**: Tool-specific rules in `policy.tool_access.yaml`
 - **Condition**: Tool exists in `tool_access` section and direction matches
-- **Actions**: `pass_through`, `tokenize`, `redact`, `deny`
+- **Actions**: `allow`, `redact`, `tokenize`, `block`, `confirm` (see Policy Actions)
 - **Policy ID**: `tool-access`
 - **Override**: Takes precedence over all lower levels
 
 ### 3. **GLOBAL_DEFAULTS** (Medium Priority)
 - **Purpose**: Global defaults for direction (ingress/egress)
 - **Condition**: No tool-specific rule applies
-- **Actions**: `pass_through`, `tokenize`, `redact`, `deny`
+- **Actions**: `allow`, `tokenize`, `block`, `confirm`; `redact` falls through to levels 4–5
 - **Policy ID**: `defaults`
 - **Override**: Takes precedence over network scope and fallback
 
 ### 4. **NETWORK_SCOPE** (Low Priority)
 - **Purpose**: Network scope redaction for external tools
 - **Condition**: Scope starts with `net.` or tool starts with `web.`, `http.`, `fetch.`, `request.`
-- **Actions**: Always `redact` (PII detection and redaction)
+- **Actions**: `redact` detected PII → `transform`; nothing detected → `allow`
 - **Policy ID**: `net-redact-presidio` or `net-redact-regex`
 - **Override**: Takes precedence over safe fallback
 
@@ -1192,6 +1174,16 @@ curl -X POST http://localhost:8080/api/v1/postcheck \
 ```
 
 ## Recent Changes Log
+- **2026-10-25**: **v2 policy semantics.** The org's dashboard policy now beats a
+  request's `policy_config` (it used to be the other way round, letting any key
+  holder bypass governance). One action vocabulary is shared with the policy UI:
+  `allow`/`block` used to fall through to redaction silently, and default
+  `confirm` was ignored. Tool rules `block`/`confirm` now apply whether or not
+  PII is present, and per-type PII handling inherits the tool's action. The
+  built-in exec denylist always applies to dashboard policies and `allow_tools`
+  is enforced as an exemption. A redaction pass that changes nothing returns
+  `allow` instead of `transform`. Allow-cache keys carry the policy revision.
+  Tests: `tests/test_policy_v2_semantics.py`.
 - **2026-08-11**: **PII detection benchmark + four detection fixes.** Added `bench/`, a
   438-item span-annotated corpus across five languages measuring the deployed
   redaction path rather than the detector in isolation. Overall leakage fell

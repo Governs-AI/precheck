@@ -47,8 +47,32 @@ def _ensure_correlation_id(corr_id: Optional[str]) -> str:
     return corr_id or f"corr-{secrets.token_hex(12)}"
 
 
+def _policy_revision(req: PrePostCheckRequest, org_id: Optional[str]) -> str:
+    """Identify the policy that will evaluate `req`, for cache keying.
+
+    The org's dashboard policy wins over a payload policy (ADR-005), so its
+    revision (id + updatedAt) is what must invalidate cached allows. The
+    lookup is served from policy_source's in-process cache.
+    """
+    if org_id:
+        from .policy_source import get_active_policy
+
+        try:
+            org_policy = get_active_policy(org_id)
+        except Exception:
+            org_policy = None
+        if org_policy:
+            return f"org:{org_policy.get('_revision') or org_policy.get('_policy_id')}"
+    if req.policy_config:
+        digest = hashlib.sha256(
+            req.policy_config.model_dump_json().encode("utf-8")
+        ).hexdigest()[:16]
+        return f"payload:{digest}"
+    return "legacy"
+
+
 def _build_allow_cache_key(req: PrePostCheckRequest, org_id: Optional[str]) -> str:
-    policy_version = req.policy_config.version if req.policy_config else "legacy"
+    policy_version = _policy_revision(req, org_id)
     payload = {
         "content": req.raw_text,
         "tool": req.tool,

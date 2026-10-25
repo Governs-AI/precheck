@@ -12,6 +12,7 @@ import time
 import pytest
 
 from app import policy_source
+from app.policies import DEFAULT_DENY_TOOLS
 from app.storage import DashboardPolicy
 
 
@@ -237,7 +238,9 @@ def test_translation_preserves_arrays_and_on_error(db_session):
         on_error="pass",
     )
     cfg = policy_source.get_active_policy("org-x")
-    assert cfg["deny_tools"] == ["python.exec"]
+    # The built-in code-exec denylist is always applied to dashboard policies.
+    assert "python.exec" in cfg["deny_tools"]
+    assert set(DEFAULT_DENY_TOOLS) <= set(cfg["deny_tools"])
     assert cfg["allow_tools"] == ["chat"]
     assert cfg["on_error"] == "pass"
 
