@@ -195,6 +195,18 @@ def extract_pii_info_from_reasons(
     return pii_types, avg_confidence
 
 
+def _refuse_dashboard_key(db: Session, raw_key: str) -> None:
+    """Dashboard keys are owned by the dashboard: rotate or revoke them there."""
+    from .key_lookup import find_key
+
+    record = find_key(db, raw_key)
+    if record is not None and record.source == "dashboard":
+        raise HTTPException(
+            status_code=409,
+            detail="dashboard-issued key: rotate or revoke it in the dashboard",
+        )
+
+
 @router.post("/v1/keys/rotate")
 async def rotate_api_key(
     auth: AuthContext = Depends(require_api_key),
@@ -203,6 +215,7 @@ async def rotate_api_key(
     """Rotate the authenticated API key: create a new key and deactivate the old one."""
     from .key_utils import generate_api_key, hash_api_key
 
+    _refuse_dashboard_key(db, auth.raw_key)
     record = (
         db.query(APIKey).filter(APIKey.key_hash == hash_api_key(auth.raw_key)).first()
     )
@@ -233,6 +246,7 @@ async def revoke_api_key(
     """Revoke the authenticated API key (deactivates it immediately)."""
     from .key_utils import hash_api_key
 
+    _refuse_dashboard_key(db, auth.raw_key)
     record = (
         db.query(APIKey).filter(APIKey.key_hash == hash_api_key(auth.raw_key)).first()
     )

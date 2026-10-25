@@ -87,6 +87,30 @@ class DashboardPolicy(Base):
     updated_at = Column("updatedAt", DateTime, default=datetime.utcnow)
 
 
+class DashboardAPIKey(Base):
+    """Read-only mirror of the dashboard's `APIKey` table (Prisma model).
+
+    The dashboard stores only `keyHash` (SHA-256 of the key) and a display
+    prefix. Precheck authenticates dashboard-issued keys against this table,
+    so revoking, rotating or expiring a key in the dashboard applies here at
+    once. Writes belong to the dashboard; see ADR-005 for the shared-DB model.
+    """
+
+    __tablename__ = "APIKey"
+
+    id = Column(String, primary_key=True)
+    key_hash = Column("keyHash", String, nullable=False, unique=True)
+    key_prefix = Column("keyPrefix", String, nullable=False)
+    user_id = Column("userId", String, nullable=False)
+    org_id = Column("org_id", String, nullable=False)
+    is_active = Column("isActive", Boolean, nullable=False, default=True)
+    expires_at = Column("expiresAt", DateTime, nullable=True)
+
+
+# Tables the dashboard owns and migrates (Prisma). Precheck only reads them.
+DASHBOARD_TABLES = {"Policy", "APIKey"}
+
+
 class UsageEvent(Base):
     __tablename__ = "usage_events"
 
@@ -146,10 +170,13 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 def create_tables():
     """Create all precheck-owned tables.
 
-    `DashboardPolicy` is intentionally excluded — that table is owned and
-    migrated by the dashboard (Prisma). Precheck only reads it. See ADR-005.
+    The dashboard mirrors (`DashboardPolicy`, `DashboardAPIKey`) are excluded:
+    those tables are owned and migrated by the dashboard (Prisma). Precheck
+    only reads them. See ADR-005.
     """
-    owned_tables = [t for t in Base.metadata.sorted_tables if t.name != "Policy"]
+    owned_tables = [
+        t for t in Base.metadata.sorted_tables if t.name not in DASHBOARD_TABLES
+    ]
     Base.metadata.create_all(bind=engine, tables=owned_tables)
 
 

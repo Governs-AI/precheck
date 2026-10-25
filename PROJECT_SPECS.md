@@ -667,6 +667,7 @@ app/
 ├── events.py        # Event emission and DLQ handling
 ├── log.py           # Structured audit logging
 ├── auth.py          # API key authentication
+├── key_lookup.py    # Dashboard (SHA-256) and precheck (HMAC) key lookup
 ├── rate_limit.py    # Rate limiting implementation
 ├── storage.py       # Data persistence layer
 └── settings.py      # Configuration management
@@ -894,7 +895,7 @@ Budget limits can be configured per user:
 | `PRECHECK_DLQ` | Dead letter queue path | `/tmp/precheck.dlq.jsonl` |
 | `WEBHOOK_URL` | Webhook URL for events | None |
 | `WEBHOOK_SECRET` | Secret for HMAC signing | `dev-webhook-secret-change-in-production` |
-| `KEY_HMAC_SECRET` | Secret for API key hashing | `dev-key-hmac-secret-change-in-production` |
+| `KEY_HMAC_SECRET` | HMAC for precheck-issued keys (`api_keys`) and the dashboard's policy-invalidate signature. Dashboard keys don't use it. | `dev-key-hmac-secret-change-in-production` |
 | `WEBHOOK_TIMEOUT_S` | Webhook request timeout | `2.5` |
 | `WEBHOOK_MAX_RETRIES` | Maximum retry attempts | `3` |
 | `WEBHOOK_BACKOFF_BASE_MS` | Base backoff delay in ms | `150` |
@@ -915,9 +916,18 @@ Budget limits can be configured per user:
 ## Security Features
 
 ### Authentication
-- API key passed to WebSocket for authentication handling
-- No API-level authentication enforcement
-- API key extracted from `X-Governs-Key` header and forwarded to webhook events
+- Every route except health/ready/metrics requires `X-Governs-Key` (`app/auth.py`).
+- `app/key_lookup.find_key` resolves the key without ever storing plaintext:
+  1. **Dashboard keys** (`gai_…`, `gov_key_…`): SHA-256 of the key looked up in
+     the dashboard's `APIKey.keyHash` (read-only mirror `DashboardAPIKey`). This
+     row is authoritative, so a dashboard deactivate, rotate or expiry applies on
+     the next request.
+  2. **Precheck keys** (`GAI_…`, from `/v1/keys/rotate`): HMAC-SHA256 with
+     `KEY_HMAC_SECRET`, looked up in `api_keys`.
+- `/v1/keys/rotate` and `/v1/keys/revoke` refuse dashboard keys (409); those
+  are managed in the dashboard.
+- The request's key is also what the emitter uses to authenticate to the
+  websocket gateway, so decisions are filed under the key's org.
 
 ### Rate Limiting
 
@@ -1143,6 +1153,14 @@ curl -X POST http://localhost:8080/api/v1/postcheck \
 ```
 
 ## Recent Changes Log
+- **2026-10-25**: **Dashboard keys are read from the dashboard, by hash.** The
+  dashboard now stores only SHA-256 + a 12-char prefix (`APIKey.keyHash`,
+  `keyPrefix`) and no longer syncs HMAC copies into `api_keys`. Precheck checks
+  dashboard keys against that table first (new `DashboardAPIKey` mirror,
+  `app/key_lookup.py`), so revocation, rotation and expiry apply immediately;
+  precheck's own `GAI_` keys still use `api_keys`. The dashboard migration
+  deactivates the old synced copies. Rollout: deploy precheck before the
+  dashboard migration.
 - **2026-10-25**: **v2 decision pipe.** Precheck decisions now actually reach the
   audit log. The emitter used to read the gateway's `READY` greeting as its AUTH
   reply, and it passed `extra_headers`, which websockets ≥14 rejects, so every
