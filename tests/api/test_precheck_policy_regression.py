@@ -29,7 +29,8 @@ TOOL_CASES = {
     },
     "send_marketing_email": {
         "raw_text": "Send the launch note to jane@example.com.",
-        "decision": "transform",
+        # Every detected span passes through, so the text is unchanged.
+        "decision": "allow",
         "policy_id": "tool-access",
         "contains": ["jane@example.com"],
         "not_contains": [],

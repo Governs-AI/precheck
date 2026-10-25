@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 """HMAC-gated /api/v1/internal/policy/invalidate endpoint tests (ADR-005)."""
+
 from __future__ import annotations
 
 import hashlib

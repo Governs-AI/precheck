@@ -79,14 +79,28 @@ jobs:
     env:
       APP_BIND: 127.0.0.1:8082
       DB_URL: sqlite:///./loadtest.db
+      # DEBUG=false so the load test exercises the production settings path,
+      # which means these must clear the 32-character minimum in
+      # Settings._validate_secret. Throwaway CI values, not secrets.
       DEBUG: "false"
-      KEY_HMAC_SECRET: ci-load-hmac-secret
-      PII_TOKEN_SALT: ci-load-salt
-      WEBHOOK_SECRET: ci-load-webhook-secret
+      KEY_HMAC_SECRET: ci-load-hmac-secret-padded-to-32-chars-min
+      PII_TOKEN_SALT: ci-load-token-salt-padded-to-32-chars-min
+      WEBHOOK_SECRET: ci-load-webhook-secret-padded-to-32-chars-min
       PRECHECK_DLQ: /tmp/precheck-load.dlq.jsonl
       LOAD_TEST_API_KEY: GAI_ci_load_test_key
       PRECHECK_BASE_URL: http://127.0.0.1:8082
       LOAD_USER_POOL_SIZE: "120"
+      # The k6 profile is 100 iters/s for 30s (3000 requests) and every one of
+      # them carries the same API key — LOAD_USER_POOL_SIZE only varies the
+      # user_id inside the payload, while the limiter keys on
+      # hash_api_key(raw_key). Against the 100/min per-key default that lets
+      # roughly 113 requests through and 429s the rest, which is what the job
+      # has been measuring. Raised so the run exercises the precheck hot path
+      # rather than its own rate limiter.
+      RATE_LIMIT_REQUESTS_PER_MINUTE: "20000"
+      RATE_LIMIT_ORG_REQUESTS_PER_MINUTE: "20000"
+      RATE_LIMIT_TOKENS_PER_MINUTE: "10000000"
+      RATE_LIMIT_ORG_TOKENS_PER_MINUTE: "10000000"
     steps:
       - uses: actions/checkout@v4
 

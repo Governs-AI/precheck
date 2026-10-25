@@ -24,8 +24,21 @@ GovernsAI Precheck is a policy evaluation and PII redaction service that provide
 ### 3. PII Detection & Redaction
 - **Presidio integration**: Advanced NLP-based PII detection
 - **Fallback detection**: Regex-based detection when Presidio unavailable
-- **Multiple PII types**: Email, SSN, phone numbers, credit cards, API keys, JWT tokens
-- **False positive filtering**: Context-aware filtering to reduce false positives
+- **Multiple PII types**: names, addresses, email, SSN, phone numbers, credit cards, IBAN, IP addresses, HIPAA PHI identifiers, PCI fields, API keys, JWT tokens
+- **Multilingual**: analyzer built per configured language (`PRESIDIO_LANGUAGES`); en, es, fr, de, zh models ship in the image
+- **False positive filtering**: context-aware filtering over the matched span
+- **Measured**: `bench/` reports leakage, over-redaction and latency per language, tier and entity type — see `bench/README.md`
+
+**Entity coverage.** `DETECT_ENTITIES` in `app/policies.py` is the list the
+analyzer is asked for. `ORGANIZATION` and `DATE_TIME` are deliberately excluded:
+both are recognised by the spaCy pipeline but neither identifies a person, and
+including them redacted 61.5% of PII-free control text. Utility loss on that
+scale makes operators disable redaction outright, which is worse than leaving
+those entities in place.
+
+**Known residual gaps** (measured, unfixed): obfuscated surface forms 75%
+leakage, partial disclosure 83.3%, Chinese 32.1%, US_SSN 14.3%. Closing the
+first two needs a different class of detector, not a better pattern.
 
 ### 4. Event Emission & Monitoring
 - **Webhook events**: Real-time policy decision events with HMAC authentication
@@ -57,66 +70,34 @@ GovernsAI Precheck is a policy evaluation and PII redaction service that provide
 - **File change detection**: Automatic reload when policy file is modified
 - **Global defaults**: Organization-wide policy stance configuration
 
-## Dynamic Policy Architecture
+## Policy Source Architecture (ADR-005)
 
-### Overview
-The precheck service now supports dynamic policy evaluation where policies are sent by the agent/client in the request payload, rather than being loaded from static YAML files. This enables real-time policy updates and user-specific policy management.
+### Where the policy comes from
+For every request precheck resolves exactly one policy, in this order:
 
-### Policy Payload Structure
-```json
-{
-  "tool": "send_email",
-  "raw_text": "Send email to john.doe@company.com with SSN 123-45-6789",
-  "scope": "net.external",
-  "corr_id": "req-12345",
-  
-  "policy_config": {
-    "version": "v1",
-    "defaults": {
-      "ingress": {"action": "redact"},
-      "egress": {"action": "redact"}
-    },
-    "tool_access": {
-      "send_email": {
-        "direction": "ingress",
-        "action": "redact",
-        "allow_pii": {
-          "PII:email_address": "pass_through",
-          "PII:us_ssn": "tokenize"
-        }
-      }
-    },
-    "deny_tools": ["python.exec", "bash.exec", "code.exec", "shell.exec"],
-    "network_scopes": ["net."],
-    "network_tools": ["web.", "http.", "fetch.", "request."],
-    "on_error": "block"
-  },
-  
-  "tool_config": {
-    "tool_name": "send_email",
-    "scope": "net.external",
-    "direction": "ingress",
-    "metadata": {
-      "category": "communication",
-      "risk_level": "medium"
-    }
-  }
-}
-```
+1. **The org's dashboard policy.** This is the highest-priority active row in the
+   dashboard's `Policy` table for the API key's `org_id`, cached in-process for
+   `POLICY_CACHE_TTL_S` (default 60s) and dropped by
+   `POST /api/v1/internal/policy/invalidate`.
+2. **Payload `policy_config`.** It is used *only* when the org has no active
+   dashboard policy. A caller can never override its org's policy, because that
+   would let any key holder opt out of governance.
+3. **Static YAML** (`policy.tool_access.yaml`), the legacy fallback.
 
-### Policy Evaluation Flow
-1. **Agent fetches policies** from database (user/org-specific)
-2. **Agent sends policies** in request payload to precheck service
-3. **Precheck evaluates** using payload policies (no database queries)
-4. **Precheck returns** decision with transformed text
-5. **Agent handles** the response and proceeds with tool execution
+`app/policy_source.py::_map_row_to_policy_config` translates a dashboard row into
+the evaluator's shape:
+- Both `defaults` shapes are accepted: `{"pii": action}` (v1 API) and
+  `{"ingress": {"action"}, "egress": {"action"}}` (policy UI). A
+  direction-specific entry beats the `pii` shorthand.
+- Actions are folded to one vocabulary by `normalize_action`.
+- The built-in code-exec denylist (`DEFAULT_DENY_TOOLS`) is always merged into
+  `deny_tools`. A listed tool is lifted only when it appears in `allow_tools`.
+- `_revision` = `id:updatedAt` keys the allow-decision cache, so a policy edit
+  can never be answered from a stale cached `allow`.
 
-### Benefits
-- **🚀 Performance**: No database queries in precheck service
-- **🔄 Real-time**: Policies updated instantly without service restart
-- **🔒 Security**: User/org-specific policies
-- **📈 Scalable**: Precheck service stays lightweight
-- **🔄 Backward Compatible**: Falls back to YAML if no payload provided
+### Policy Payload Structure (fallback only)
+The request body may still carry `policy_config` and `tool_config`, as
+documented in the OpenAPI spec. `budget_context` is always honoured.
 
 ## API Documentation
 
@@ -383,88 +364,57 @@ GET /api/metrics
 ## Event Schema
 
 ### Policy Decision Event
-Every policy decision emits a webhook event with the following schema:
+Every precheck/postcheck decision is sent to the dashboard's websocket-service,
+which persists it as a `Decision` row (the audit log). Built by
+`app/api.py::_build_decision_event`:
 
 ```json
 {
   "type": "INGEST",
-  "channel": "org:YOUR_ORG:decisions",
+  "channel": "org:ORG_ID:decisions",
   "schema": "decision.v1",
-  "idempotencyKey": "precheck-1735229123456-abc123def",
+  "idempotencyKey": "precheck-1792921490-corr-abc123",
   "data": {
-    "orgId": "YOUR_ORG_ID",
+    "orgId": "ORG_ID",
     "direction": "precheck",
     "decision": "transform",
-    "tool": "verify_identity",
+    "tool": "model.chat",
     "scope": "net.external",
-    "rawText": "User email: alice@example.com, SSN: 123-45-6789",
-    "rawTextOut": "User email: alice@example.com, SSN: pii_8797942a",
-    "reasons": ["pii.allowed:PII:email_address","pii.tokenized:PII:us_ssn"],
-    "detectorSummary": {
-      "reasons": ["pii.allowed:PII:email_address","pii.tokenized:PII:us_ssn"],
-      "confidence": 0.85,
-      "piiDetected": ["email_address", "us_ssn"]
-    },
-    "payloadHash": "sha256:a1b2c3d4e5f6...",
+    "policyId": "net-redact-presidio",
+    "payloadOut": {"raw_text_out": "email me at <USER_EMAIL>"},
+    "reasons": ["pii.redacted:email_address"],
+    "detectorSummary": {"reasons": ["..."], "confidence": 0.7, "piiDetected": ["email_address"]},
+    "payloadHash": "sha256:a1b2c3...",
     "latencyMs": 45,
-    "correlationId": "req-123",
-    "tags": ["production", "api-call"],
-    "ts": "2024-12-26T10:15:30.123Z",
-    "authentication": {
-      "userId": "u1",
-      "apiKey": "GAI_LOCAL_DEV_ABC"
-    }
+    "correlationId": "corr-abc123",
+    "tags": ["demo", "chat"],
+    "ts": "2026-10-25T09:44:50+00:00",
+    "authentication": {"userId": "u1", "apiKeyId": "<sha256(key)[:16]>"}
   }
 }
 ```
 
-### Event Fields
+- `policyId` is the org's dashboard `Policy.id` when that policy decided, else
+  the rule level (`deny-exec`, `defaults`, …). The rule level is always in
+  `detectorSummary.rule`.
+- **The raw input never leaves precheck**: only `payloadHash` is sent.
+  `payloadOut` holds the redacted output of `transform` decisions only, and can
+  be turned off with `AUDIT_INCLUDE_REDACTED_OUTPUT=false`.
+- `tags` are the request's `tags`. `ts` is UTC.
 
-#### Top-Level Fields
-- **`type`**: Event type, always `"INGEST"` for decision events
-- **`channel`**: WebSocket channel format `"org:{ORG_ID}:decisions"`
-- **`schema`**: Schema version, currently `"decision.v1"`
-- **`idempotencyKey`**: Unique key for deduplication (format: `{direction}-{timestamp}-{correlation_id}`)
-
-#### Data Fields
-- **`orgId`**: Organization identifier (configurable via `ORG_ID` environment variable)
-- **`direction`**: `"precheck"` for ingress, `"postcheck"` for egress
-- **`decision`**: Policy decision (`allow`, `deny`, `transform`, `confirm`)
-- **`tool`**: Tool name from the request
-- **`scope`**: Network scope from the request
-- **`rawText`**: Original raw text input from the request
-- **`rawTextOut`**: Processed text output with redundant values replaced
-- **`reasons`**: Array of reason codes explaining the decision
-- **`detectorSummary`**: PII detection results and confidence
-  - **`reasons`**: Array of reason codes explaining the decision
-  - **`confidence`**: Calculated confidence score (0.0-1.0) based on PII detection actions
-  - **`piiDetected`**: Array of detected PII types (e.g., `["email_address", "us_ssn"]`)
-- **`payloadHash`**: SHA256 hash of the request payload for integrity verification
-- **`latencyMs`**: Processing time in milliseconds
-- **`correlationId`**: Correlation ID for request tracking
-- **`tags`**: Array of strings for categorization (currently empty, configurable)
-- **`ts`**: ISO 8601 timestamp of the decision
-- **`authentication`**: Authentication information from the request
-  - **`userId`**: User ID extracted from the URL path parameter
-  - **`apiKey`**: API key from the request header
-
-### WebSocket Webhook Integration
-
-The service uses WebSocket connections to send webhook events instead of HTTP POST requests:
-
-**URL Format**: `ws://host:port/api/ws/gateway?key=API_KEY&org=ORG_ID&channels=CHANNEL_LIST`
-
-**Example**:
-```
-ws://172.16.10.59:3002/api/ws/gateway?key=gai_827eode3nxa&org=dfy&channels=org:cmfzriajm0003fyp86ocrgjoj:decisions,org:cmfzriajm0003fyp86ocrgjoj:postcheck,org:cmfzriajm0003fyp86ocrgjoj:dlq,org:cmfzriajm0003fyp86ocrgjoj:precheck,org:cmfzriajm0003fyp86ocrgjoj:approvals,user:cmfzriaip0000fyp81gjfkri9:notifications
-```
-
-**Parsed Values**:
-- **`orgId`**: Extracted from `org` parameter (`dfy`)
-- **`channel`**: Extracted from `channels` parameter, finds the `:decisions` channel (`org:cmfzriajm0003fyp86ocrgjoj:decisions`)
-- **`apiKey`**: Extracted from `key` parameter (`gai_827eode3nxa`)
-
-**Dynamic Configuration**: All values are dynamically extracted from the webhook URL. If parsing fails or values (`orgId` or `channel`) are not found in the URL, they will be `null` in the webhook event, but the event will still be emitted. The service will always process the request and emit webhook events regardless of URL parsing success.
+### Delivery (`app/events.py`)
+- `WEBHOOK_BASE_URL` (e.g. `ws://localhost:3001/ws`) is required. Without it
+  every event goes to the DLQ (`PRECHECK_DLQ`) and the audit log stays empty.
+- Per event the emitter connects, skips the gateway's `READY` greeting, sends
+  `AUTH` with the **request's own API key** (`WEBHOOK_CONN_KEY` is only a
+  fallback), waits for `AUTH_SUCCESS`, sends `INGEST`, and waits for `ACK`. An
+  `ERROR` frame or a timeout counts as a failed attempt. After
+  `WEBHOOK_MAX_RETRIES` attempts the event is written to the DLQ.
+- The gateway files a decision under the org of the key that authenticated the
+  connection, so one org's key cannot write into another org's audit log.
+- A failed TLS handshake is **not** retried over plaintext (that fallback was removed).
+- Supports websockets ≥12. The header keyword is picked per major version
+  (`additional_headers` from 14 on).
 
 ## Policy Configuration
 
@@ -571,11 +521,25 @@ tool_access:
 
 ### Policy Actions
 
-- **`pass_through`**: Allow raw PII value to pass through unchanged
-- **`tokenize`**: Replace PII with stable token (e.g., `pii_8797942a`)
-- **`redact`**: Apply standard redaction (e.g., `<USER_EMAIL>`, `<USER_SSN>`)
-- **`deny`**: Block the request entirely
-- **`confirm`**: Require an approval/confirmation step before tool execution
+The dashboard and the evaluator share one vocabulary (aliases in brackets):
+
+- **`allow`** [`pass_through`]: let the value or request through unchanged
+- **`redact`**: replace detected PII with a placeholder (e.g. `<USER_EMAIL>`)
+- **`tokenize`**: replace detected PII with a stable token (e.g. `pii_8797942a`)
+- **`block`** [`deny`]: deny the request
+- **`confirm`**: return `confirm`; the caller must get approval before acting
+
+What an action means depends on where it is set:
+
+| Set on | `allow` | `redact` / `tokenize` | `block` | `confirm` |
+|---|---|---|---|---|
+| `defaults.<direction>` | allow request untouched | transform if PII found, else allow | deny every request | confirm every request |
+| `tool_access.<tool>.action` | PII passes through | transform if PII found, else allow | deny, PII or not | confirm, PII or not |
+| `tool_access.<tool>.allow_pii.<PII:type>` | that type passes | that type is redacted/tokenized | deny if that type appears | (treated as redact) |
+
+A tool in `allow_tools` is exempt from a default `block`/`confirm` and is
+redacted instead, so "default block + allow_tools" works as an allowlist.
+Explicit `deny_tools` still wins over `allow_tools`.
 
 ### Global Defaults
 
@@ -591,29 +555,35 @@ The policy evaluation system follows a strict precedence hierarchy (highest to l
 
 ### 1. **DENY_TOOLS** (Highest Priority)
 - **Purpose**: Hard deny for dangerous tools
-- **Tools**: `python.exec`, `bash.exec`, `code.exec`, `shell.exec`
+- **Tools**: `python.exec`, `bash.exec`, `code.exec`, `shell.exec`, `subprocess.run`, `subprocess.popen`, `os.system`, `child_process.exec`, `child_process.spawn`, `runtime.exec`
 - **Decision**: Always `deny`
 - **Policy ID**: `deny-exec`
 - **Reason**: `blocked tool: code/exec`
+- **Matching**: `is_denied_tool()` normalises case, whitespace and separators
+  (`_`, `-`, `/`, `:` all fold to `.`), then matches on exact name, component
+  set (so `exec.python` matches `python.exec`), containment within a namespaced
+  path (`agent.python.exec.v2`), and explicit `namespace.*` wildcards. Denial is
+  a security boundary, so matching is deliberately generous: a false deny is a
+  support ticket, a false allow is an incident.
 
 ### 2. **TOOL_SPECIFIC** (High Priority)
 - **Purpose**: Tool-specific rules in `policy.tool_access.yaml`
 - **Condition**: Tool exists in `tool_access` section and direction matches
-- **Actions**: `pass_through`, `tokenize`, `redact`, `deny`
+- **Actions**: `allow`, `redact`, `tokenize`, `block`, `confirm` (see Policy Actions)
 - **Policy ID**: `tool-access`
 - **Override**: Takes precedence over all lower levels
 
 ### 3. **GLOBAL_DEFAULTS** (Medium Priority)
 - **Purpose**: Global defaults for direction (ingress/egress)
 - **Condition**: No tool-specific rule applies
-- **Actions**: `pass_through`, `tokenize`, `redact`, `deny`
+- **Actions**: `allow`, `tokenize`, `block`, `confirm`; `redact` falls through to levels 4–5
 - **Policy ID**: `defaults`
 - **Override**: Takes precedence over network scope and fallback
 
 ### 4. **NETWORK_SCOPE** (Low Priority)
 - **Purpose**: Network scope redaction for external tools
 - **Condition**: Scope starts with `net.` or tool starts with `web.`, `http.`, `fetch.`, `request.`
-- **Actions**: Always `redact` (PII detection and redaction)
+- **Actions**: `redact` detected PII → `transform`; nothing detected → `allow`
 - **Policy ID**: `net-redact-presidio` or `net-redact-regex`
 - **Override**: Takes precedence over safe fallback
 
@@ -652,12 +622,35 @@ The policy evaluation system follows a strict precedence hierarchy (highest to l
 | Credit Card | `CREDIT_CARD` | `4111-1111-1111-1111` |
 | API Key | `API_KEY` | `sk-1234567890abcdef` |
 | JWT Token | `JWT_TOKEN` | `eyJhbGciOiJIUzI1NiIs...` |
+| Name | `PERSON` (spaCy NER) | `Maria Garcia` |
+| Street address / place of residence | `LOCATION` (address recognizer + spaCy NER) | `42 Baker Street`, "lives in Leeds" |
+| Nationality / religion / political group | `NRP` (spaCy NER) | |
 
 ### Detection Methods
 
 1. **Presidio (Primary)**: Advanced NLP-based detection with custom recognizers
 2. **Regex (Fallback)**: Pattern-based detection when Presidio unavailable
 3. **Context-aware filtering**: Reduces false positives based on field names and patterns
+4. **NER precision** (`refine_ner_results`, applied in `analyze_text` so every
+   detection path gets it):
+   - A bare place name (France, Paris, New York) is not PII and passes
+     through. It stays redacted when it follows a residence cue ("lives in",
+     "born in", "vive en", "habite à", "wohnt in", "住在", …) or sits next to
+     a house number.
+   - Command and business words ("Email", "Summarise", "Payment", …;
+     `NOT_A_NAME`, which excludes words that are also given names) are trimmed
+     out of PERSON spans.
+   - `StreetAddressRecognizer`: format-based street addresses for en/es/fr/de/zh,
+     registered for every language pipeline.
+   - A language name (`LANGUAGE_NAMES`) used as a language ("in French", "into
+     Spanish and Italian") is not NRP; nationality and religion still are.
+   - `GIVEN_NAME_PLACES` (Jordan, Georgia, Charlotte, …): in a person position
+     (subject of a human action, after "Ask/Hi") they become PERSON, even when
+     spaCy found nothing; in a place position ("in Jordan", "our Austin
+     office") they are treated as places.
+   - Measured in `bench/` (tiers `clean_context`, `context`): over-redaction
+     went from 25.7% to 0.9% and catch rate from 92.7% to 93.6%, with no
+     newly leaked value. See `bench/README.md`.
 
 ## Tokenization
 
@@ -697,6 +690,7 @@ app/
 ├── events.py        # Event emission and DLQ handling
 ├── log.py           # Structured audit logging
 ├── auth.py          # API key authentication
+├── key_lookup.py    # Dashboard (SHA-256) and precheck (HMAC) key lookup
 ├── rate_limit.py    # Rate limiting implementation
 ├── storage.py       # Data persistence layer
 └── settings.py      # Configuration management
@@ -924,14 +918,16 @@ Budget limits can be configured per user:
 | `PRECHECK_DLQ` | Dead letter queue path | `/tmp/precheck.dlq.jsonl` |
 | `WEBHOOK_URL` | Webhook URL for events | None |
 | `WEBHOOK_SECRET` | Secret for HMAC signing | `dev-webhook-secret-change-in-production` |
-| `KEY_HMAC_SECRET` | Secret for API key hashing | `dev-key-hmac-secret-change-in-production` |
+| `KEY_HMAC_SECRET` | HMAC for precheck-issued keys (`api_keys`) and the dashboard's policy-invalidate signature. Dashboard keys don't use it. | `dev-key-hmac-secret-change-in-production` |
 | `WEBHOOK_TIMEOUT_S` | Webhook request timeout | `2.5` |
 | `WEBHOOK_MAX_RETRIES` | Maximum retry attempts | `3` |
 | `WEBHOOK_BACKOFF_BASE_MS` | Base backoff delay in ms | `150` |
 | `ON_ERROR` | Error handling behavior | `block` |
 | `POLICY_FILE` | Policy file path | `policy.tool_access.yaml` |
 | `USE_PRESIDIO` | Enable Presidio PII detection | `true` |
-| `PRESIDIO_MODEL` | spaCy model for Presidio | `en_core_web_sm` |
+| `PRESIDIO_MODEL` | English spaCy model for Presidio | `en_core_web_sm` |
+| `PRESIDIO_LANGUAGES` | Comma-separated analyzer languages; each needs its spaCy model installed | `en` |
+| `PRESIDIO_LANGUAGE_MODE` | `hint` (one pass, caller-supplied language) or `union` (all configured languages, recall-safe, ~N× NLP cost and higher false positives) | `hint` |
 
 ### API Configuration
 
@@ -943,9 +939,18 @@ Budget limits can be configured per user:
 ## Security Features
 
 ### Authentication
-- API key passed to WebSocket for authentication handling
-- No API-level authentication enforcement
-- API key extracted from `X-Governs-Key` header and forwarded to webhook events
+- Every route except health/ready/metrics requires `X-Governs-Key` (`app/auth.py`).
+- `app/key_lookup.find_key` resolves the key without ever storing plaintext:
+  1. **Dashboard keys** (`gai_…`, `gov_key_…`): SHA-256 of the key looked up in
+     the dashboard's `APIKey.keyHash` (read-only mirror `DashboardAPIKey`). This
+     row is authoritative, so a dashboard deactivate, rotate or expiry applies on
+     the next request.
+  2. **Precheck keys** (`GAI_…`, from `/v1/keys/rotate`): HMAC-SHA256 with
+     `KEY_HMAC_SECRET`, looked up in `api_keys`.
+- `/v1/keys/rotate` and `/v1/keys/revoke` refuse dashboard keys (409); those
+  are managed in the dashboard.
+- The request's key is also what the emitter uses to authenticate to the
+  websocket gateway, so decisions are filed under the key's org.
 
 ### Rate Limiting
 
@@ -1171,6 +1176,80 @@ curl -X POST http://localhost:8080/api/v1/postcheck \
 ```
 
 ## Recent Changes Log
+- **2026-10-25**: **PII precision follow-up (V2.18).** Languages used as
+  languages are no longer redacted as NRP, and given names that are also
+  places ("Jordan approved…", "Charlotte signed…") are redacted as PERSON
+  again. Bench (597 items): over-redaction 4.5% → 0.0%, catch rate
+  92.3% → 93.7%, PERSON leakage 13.3% → 9.9%, 0 newly leaked values.
+- **2026-10-25**: **PII precision (V2.14).** Place names and sentence-initial
+  command words are no longer redacted: `refine_ner_results` keeps a bare
+  LOCATION only in residence/address context and trims `NOT_A_NAME` words from
+  PERSON spans. A new street-address recognizer catches the street itself,
+  which used to leak while only the city was replaced. The bench gained
+  `clean_context`/`context` tiers and a `LOCATION_STREET` line. Results:
+  over-redaction 25.7% → 0.9%, catch rate 92.7% → 93.6%, street addresses
+  caught 70.8% → 100%, 0 newly leaked values. Tests: `tests/test_pii_precision.py`.
+- **2026-10-25**: **Dashboard keys are read from the dashboard, by hash.** The
+  dashboard now stores only SHA-256 + a 12-char prefix (`APIKey.keyHash`,
+  `keyPrefix`) and no longer syncs HMAC copies into `api_keys`. Precheck checks
+  dashboard keys against that table first (new `DashboardAPIKey` mirror,
+  `app/key_lookup.py`), so revocation, rotation and expiry apply immediately;
+  precheck's own `GAI_` keys still use `api_keys`. The dashboard migration
+  deactivates the old synced copies. Rollout: deploy precheck before the
+  dashboard migration.
+- **2026-10-25**: **v2 decision pipe.** Precheck decisions now actually reach the
+  audit log. The emitter used to read the gateway's `READY` greeting as its AUTH
+  reply, and it passed `extra_headers`, which websockets ≥14 rejects, so every
+  event went to the DLQ. It now authenticates with the request's key and waits
+  for `ACK`. The event drops `rawText`, adds `policyId` and `payloadOut`, and
+  uses real UTC timestamps. The plaintext fallback after a TLS failure is gone.
+  The Presidio loggers are pinned to WARNING so `DEBUG=true` can't log prompt
+  text. `env.example` now points at the shared Postgres and the local gateway.
+  Tests: `tests/test_decision_event_pipe.py`.
+- **2026-10-25**: **v2 policy semantics.** The org's dashboard policy now beats a
+  request's `policy_config` (it used to be the other way round, letting any key
+  holder bypass governance). One action vocabulary is shared with the policy UI:
+  `allow`/`block` used to fall through to redaction silently, and default
+  `confirm` was ignored. Tool rules `block`/`confirm` now apply whether or not
+  PII is present, and per-type PII handling inherits the tool's action. The
+  built-in exec denylist always applies to dashboard policies and `allow_tools`
+  is enforced as an exemption. A redaction pass that changes nothing returns
+  `allow` instead of `transform`. Allow-cache keys carry the policy revision.
+  Tests: `tests/test_policy_v2_semantics.py`.
+- **2026-08-11**: **PII detection benchmark + four detection fixes.** Added `bench/`, a
+  438-item span-annotated corpus across five languages measuring the deployed
+  redaction path rather than the detector in isolation. Overall leakage fell
+  **51.3% → 8.2%**; high-sensitivity entity leakage **89.1% → 10.6%**; PERSON and
+  LOCATION **100% → ~11.6%**; over-redaction stayed at 0% and p50 latency was
+  unchanged (2.46 → 2.48 ms).
+  - **Entity allowlist**: the analyzer was asked only for the 16 keys of
+    `ANONYMIZE_OPERATORS`, which contain no `PERSON`, `LOCATION` or `NRP`. The
+    spaCy model detected names at score 0.85 and the pipeline then discarded
+    them — names and addresses were never redacted, in any language. Replaced
+    with an explicit `DETECT_ENTITIES` list; `ORGANIZATION` and `DATE_TIME`
+    stay excluded to protect utility.
+  - **Language pin**: `ANALYZER.analyze(..., language="en")` was hardcoded at all
+    three call sites and `AnalyzerEngine` was built with `supported_languages=["en"]`,
+    so the es/fr/de/zh models the Dockerfile installs were unreachable. Added
+    `PRESIDIO_LANGUAGES`, `PRESIDIO_LANGUAGE_MODE`, per-request language hints via
+    `tool_config.metadata.language`, and a shared `analyze_text()` so the three
+    sites cannot drift.
+  - **Per-language recognizer gaps**: Presidio registers `CreditCardRecognizer`
+    for en/es only, and its default phone regions exclude ES/FR/CN. A hinted
+    fr/de/zh request leaked 61.5% of card numbers. Both now registered per
+    configured language.
+  - **False-positive filter**: `is_false_positive()` was receiving the whole input
+    text instead of the matched span, so its suppression rules almost never
+    fired. The `US_SSN` recognizer also passed `deny_list=["password", "key", ...]`,
+    but Presidio's `deny_list` is a list of terms to *detect* — the literal word
+    "key" matched as an SSN. Removed; suppression lives in `is_false_positive()`.
+  - **Denylist matching**: `if tool in deny_tools` was an exact string test.
+    `Python.Exec`, `python_exec`, `exec.python` and `agent.python.exec.v2` all
+    walked past it. Replaced with `is_denied_tool()` (normalisation, component-set,
+    containment, `namespace.*` wildcards) and extended the defaults with
+    `subprocess.run`, `os.system` and other direct execution primitives.
+  - **Tests**: +69 (`test_deny_tools_matching.py`, `test_multilingual_pii.py`);
+    suite 258 → 327 passing, coverage 75.1% → 76.8%.
 - **2026-04-23**: Added the Mode 2 sidecar / proxy gateway design document at `docs/design/sidecar-mode.md`
   - **Language Decision**: Recommends Go for the proxy hot path over Node.js and Python
   - **Interception Model**: Defines `POST /v1/chat/completions` interception with `precheck` before upstream forwarding

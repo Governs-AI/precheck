@@ -1,4 +1,5 @@
 import hashlib
+import importlib.util
 import os
 import re
 import time
@@ -11,8 +12,13 @@ from presidio_analyzer import (
     Pattern,
     PatternRecognizer,
     RecognizerRegistry,
+    RecognizerResult,
 )
 from presidio_analyzer.nlp_engine import SpacyNlpEngine
+from presidio_analyzer.predefined_recognizers import (
+    CreditCardRecognizer,
+    PhoneRecognizer,
+)
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 
@@ -114,158 +120,591 @@ ANONYMIZER = None
 USE_PRESIDIO = settings.use_presidio if hasattr(settings, "use_presidio") else True
 
 
-def build_presidio():
-    """Initialize Presidio analyzer and anonymizer with custom recognizers"""
-    try:
-        # Initialize spaCy NLP engine with configured model and load it
-        model_name = getattr(settings, "presidio_model", "en_core_web_sm")
-        # Presidio 2.x expects a list of {lang_code, model_name}
-        nlp_engine = SpacyNlpEngine(
-            models=[{"lang_code": "en", "model_name": model_name}]
-        )
-        nlp_engine.load()
-        registry = RecognizerRegistry()
-        registry.load_predefined_recognizers(nlp_engine=nlp_engine)
+# spaCy model used for each supported language. The English entry is
+# overridable via PRESIDIO_MODEL (sm/md/lg); the rest track the models the
+# Dockerfile installs.
+DEFAULT_SPACY_MODELS = {
+    "en": "en_core_web_sm",
+    "es": "es_core_news_sm",
+    "fr": "fr_core_news_sm",
+    "de": "de_core_news_sm",
+    "zh": "zh_core_web_sm",
+}
 
-        # Custom API key recognizer
-        api_key_pattern = Pattern(
-            name="API_KEY",
-            regex=r"(?:sk|pk|AKIA|ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{16,40}",
-            score=0.6,
-        )
-        api_key_recognizer = PatternRecognizer(
+# phonenumbers regions to try per configured language. Presidio's default region
+# set is US/UK/DE/FE/IL/IN/CA/BR, which silently misses ES, FR and CN numbers
+# even when the matching spaCy model is loaded.
+PHONE_REGIONS_BY_LANGUAGE = {
+    "en": ["US", "UK", "CA", "IN", "AU"],
+    "es": ["ES", "MX", "AR"],
+    "fr": ["FR", "BE", "CA"],
+    "de": ["DE", "AT", "CH"],
+    "zh": ["CN", "HK", "TW"],
+}
+
+# Languages the analyzer was actually built for. Populated by build_presidio;
+# a configured language whose spaCy model is missing is dropped from this list
+# rather than taking the whole service down.
+SUPPORTED_LANGUAGES: List[str] = ["en"]
+
+
+def _model_available(model_name: str) -> bool:
+    return importlib.util.find_spec(model_name) is not None
+
+
+def _resolve_language_models() -> List[Dict[str, str]]:
+    """Build the {lang_code, model_name} list for the configured languages."""
+    configured = settings.presidio_language_list()
+    models: List[Dict[str, str]] = []
+    for lang in configured:
+        if lang == "en":
+            model_name = getattr(settings, "presidio_model", "en_core_web_sm")
+        else:
+            model_name = DEFAULT_SPACY_MODELS.get(lang)
+        if not model_name:
+            print(f"Presidio: no spaCy model mapped for language {lang!r}; skipping")
+            continue
+        if not _model_available(model_name):
+            print(
+                f"Presidio: spaCy model {model_name!r} for language {lang!r} is not "
+                "installed; skipping that language"
+            )
+            continue
+        models.append({"lang_code": lang, "model_name": model_name})
+
+    if not models:
+        models = [{"lang_code": "en", "model_name": "en_core_web_sm"}]
+    return models
+
+
+def _custom_recognizers(language: str) -> List[PatternRecognizer]:
+    """Pattern recognizers registered for every supported language.
+
+    Presidio scopes each recognizer to one language, so the same set is built
+    per language rather than once globally — otherwise a Spanish request gets
+    the spaCy NER model but none of the SSN/PHI/PCI patterns.
+    """
+    recognizers: List[PatternRecognizer] = []
+
+    # API keys. Underscore is optional so bare AWS-style keys (AKIA...) match,
+    # and vendor-prefixed keys (sk_live_..., pk_test_...) match through their
+    # internal separators.
+    recognizers.append(
+        PatternRecognizer(
             supported_entity="API_KEY",
-            patterns=[api_key_pattern],
+            supported_language=language,
+            patterns=[
+                Pattern(
+                    name="API_KEY_VENDOR_PREFIXED",
+                    regex=r"\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{10,40}\b",
+                    score=0.75,
+                ),
+                Pattern(
+                    name="API_KEY",
+                    regex=r"\b(?:sk|pk|AKIA|ghp|gho|ghu|ghs|ghr)_?[A-Za-z0-9]{16,40}\b",
+                    score=0.6,
+                ),
+            ],
             context=["secret", "token", "apikey", "api_key", "bearer", "key"],
         )
-        registry.add_recognizer(api_key_recognizer)
+    )
 
-        # JWT token recognizer
-        jwt_pattern = Pattern(
-            name="JWT_TOKEN",
-            regex=r"eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*",
-            score=0.8,
-        )
-        jwt_recognizer = PatternRecognizer(
+    recognizers.append(
+        PatternRecognizer(
             supported_entity="JWT_TOKEN",
-            patterns=[jwt_pattern],
+            supported_language=language,
+            patterns=[
+                Pattern(
+                    name="JWT_TOKEN",
+                    regex=r"eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*",
+                    score=0.8,
+                )
+            ],
             context=["token", "jwt", "bearer", "authorization"],
         )
-        registry.add_recognizer(jwt_recognizer)
+    )
 
-        # Override SSN recognizer to be more context-aware and exclude passwords
-        ssn_pattern = Pattern(
-            name="US_SSN",
-            regex=r"\b(?!000|666|9\d{2})\d{3}[-]?(?!00)\d{2}[-]?(?!0000)\d{4}\b",
-            score=0.8,
-        )
-        ssn_recognizer = PatternRecognizer(
+    # Override SSN recognizer to be more context-aware and exclude passwords
+    recognizers.append(
+        PatternRecognizer(
             supported_entity="US_SSN",
-            patterns=[ssn_pattern],
+            supported_language=language,
+            patterns=[
+                Pattern(
+                    name="US_SSN",
+                    regex=r"\b(?!000|666|9\d{2})\d{3}[-]?(?!00)\d{2}[-]?(?!0000)\d{4}\b",
+                    score=0.8,
+                )
+            ],
             context=["ssn", "social", "security", "tax", "id", "number"],
-            deny_list=["password", "pass", "pwd", "secret", "key", "token"],
+            # No deny_list here. Presidio's deny_list is a list of terms to
+            # *detect*, not to suppress — passing ["password", "key", ...] made
+            # the literal word "key" match as US_SSN. Suppression belongs in
+            # is_false_positive(), which runs over the matched span below.
         )
-        registry.add_recognizer(ssn_recognizer)
+    )
 
-        # HIPAA PHI recognizers
-        registry.add_recognizer(
-            PatternRecognizer(
-                supported_entity="US_MEDICAL_RECORD_NUMBER",
-                patterns=[
-                    Pattern(
-                        name="US_MEDICAL_RECORD_NUMBER",
-                        regex=r"\b(?:MRN|Medical\s*Record(?:\s*Number)?|Patient\s*ID)\s*[:#]?\s*[A-Z0-9\-]{6,20}\b",
-                        score=0.82,
-                    )
-                ],
-                context=["mrn", "medical record", "patient id", "chart"],
-            )
+    # HIPAA PHI recognizers
+    recognizers.append(
+        PatternRecognizer(
+            supported_entity="US_MEDICAL_RECORD_NUMBER",
+            supported_language=language,
+            patterns=[
+                Pattern(
+                    name="US_MEDICAL_RECORD_NUMBER",
+                    regex=r"\b(?:MRN|Medical\s*Record(?:\s*Number)?|Patient\s*ID)\s*[:#]?\s*[A-Z0-9\-]{6,20}\b",
+                    score=0.82,
+                )
+            ],
+            context=["mrn", "medical record", "patient id", "chart"],
         )
-        registry.add_recognizer(
-            PatternRecognizer(
-                supported_entity="US_HEALTH_MEMBER_ID",
-                patterns=[
-                    Pattern(
-                        name="US_HEALTH_MEMBER_ID",
-                        regex=r"\b(?:Member|Policy|Insurance)\s*(?:ID|Number)\s*[:#]?\s*[A-Z0-9\-]{6,24}\b",
-                        score=0.8,
-                    )
-                ],
-                context=["member id", "policy", "insurance", "payer"],
-            )
+    )
+    recognizers.append(
+        PatternRecognizer(
+            supported_entity="US_HEALTH_MEMBER_ID",
+            supported_language=language,
+            patterns=[
+                Pattern(
+                    name="US_HEALTH_MEMBER_ID",
+                    regex=r"\b(?:Member|Policy|Insurance)\s*(?:ID|Number)\s*[:#]?\s*[A-Z0-9\-]{6,24}\b",
+                    score=0.8,
+                )
+            ],
+            context=["member id", "policy", "insurance", "payer"],
         )
-        registry.add_recognizer(
-            PatternRecognizer(
-                supported_entity="US_NPI",
-                patterns=[
-                    Pattern(
-                        name="US_NPI",
-                        regex=r"\b(?:NPI|National\s*Provider\s*Identifier)\s*[:#]?\s*\d{10}\b",
-                        score=0.85,
-                    )
-                ],
-                context=["npi", "provider", "national provider identifier"],
-            )
+    )
+    recognizers.append(
+        PatternRecognizer(
+            supported_entity="US_NPI",
+            supported_language=language,
+            patterns=[
+                Pattern(
+                    name="US_NPI",
+                    regex=r"\b(?:NPI|National\s*Provider\s*Identifier)\s*[:#]?\s*\d{10}\b",
+                    score=0.85,
+                )
+            ],
+            context=["npi", "provider", "national provider identifier"],
         )
-        registry.add_recognizer(
-            PatternRecognizer(
-                supported_entity="US_DEA",
-                patterns=[
-                    Pattern(
-                        name="US_DEA",
-                        regex=r"\b(?:DEA|DEA\s*Number)\s*[:#]?\s*[A-Z]{2}\d{7}\b",
-                        score=0.85,
-                    )
-                ],
-                context=["dea", "prescriber", "controlled substance"],
-            )
+    )
+    recognizers.append(
+        PatternRecognizer(
+            supported_entity="US_DEA",
+            supported_language=language,
+            patterns=[
+                Pattern(
+                    name="US_DEA",
+                    regex=r"\b(?:DEA|DEA\s*Number)\s*[:#]?\s*[A-Z]{2}\d{7}\b",
+                    score=0.85,
+                )
+            ],
+            context=["dea", "prescriber", "controlled substance"],
         )
-        registry.add_recognizer(
-            PatternRecognizer(
-                supported_entity="US_DATE_OF_BIRTH",
-                patterns=[
-                    Pattern(
-                        name="US_DATE_OF_BIRTH",
-                        regex=r"\b(?:DOB|Date\s*of\s*Birth)\s*[:#]?\s*(?:0?[1-9]|1[0-2])[/-](?:0?[1-9]|[12][0-9]|3[01])[/-](?:19|20)?\d{2}\b",
-                        score=0.78,
-                    )
-                ],
-                context=["dob", "date of birth", "patient"],
-            )
+    )
+    recognizers.append(
+        PatternRecognizer(
+            supported_entity="US_DATE_OF_BIRTH",
+            supported_language=language,
+            patterns=[
+                Pattern(
+                    name="US_DATE_OF_BIRTH",
+                    regex=r"\b(?:DOB|Date\s*of\s*Birth)\s*[:#]?\s*(?:0?[1-9]|1[0-2])[/-](?:0?[1-9]|[12][0-9]|3[01])[/-](?:19|20)?\d{2}\b",
+                    score=0.78,
+                )
+            ],
+            context=["dob", "date of birth", "patient"],
         )
+    )
 
-        # PCI-DSS related recognizers
-        registry.add_recognizer(
-            PatternRecognizer(
-                supported_entity="PCI_CVV",
-                patterns=[
-                    Pattern(
-                        name="PCI_CVV",
-                        regex=r"\b(?:cvv|cvc|cvn|security\s*code)\s*[:#]?\s*\d{3,4}\b",
-                        score=0.88,
-                    )
-                ],
-                context=["cvv", "cvc", "security code", "payment"],
-            )
+    # PCI-DSS related recognizers
+    recognizers.append(
+        PatternRecognizer(
+            supported_entity="PCI_CVV",
+            supported_language=language,
+            patterns=[
+                Pattern(
+                    name="PCI_CVV",
+                    regex=r"\b(?:cvv|cvc|cvn|security\s*code)\s*[:#]?\s*\d{3,4}\b",
+                    score=0.88,
+                )
+            ],
+            context=["cvv", "cvc", "security code", "payment"],
         )
-        registry.add_recognizer(
-            PatternRecognizer(
-                supported_entity="PCI_EXPIRY",
-                patterns=[
-                    Pattern(
-                        name="PCI_EXPIRY",
-                        regex=r"\b(?:exp(?:iry|iration)?|valid\s*thru)\s*[:#]?\s*(?:0[1-9]|1[0-2])[/-](?:\d{2}|\d{4})\b",
-                        score=0.84,
-                    )
-                ],
-                context=["expiry", "expiration", "valid thru", "payment"],
-            )
+    )
+    recognizers.append(
+        PatternRecognizer(
+            supported_entity="PCI_EXPIRY",
+            supported_language=language,
+            patterns=[
+                Pattern(
+                    name="PCI_EXPIRY",
+                    regex=r"\b(?:exp(?:iry|iration)?|valid\s*thru)\s*[:#]?\s*(?:0[1-9]|1[0-2])[/-](?:\d{2}|\d{4})\b",
+                    score=0.84,
+                )
+            ],
+            context=["expiry", "expiration", "valid thru", "payment"],
         )
+    )
+
+    recognizers.append(_street_address_recognizer(language))
+
+    return recognizers
+
+
+# ---------------------------------------------------------------------------
+# NER precision (V2.14)
+#
+# spaCy's small models tag every country and city as LOCATION and many
+# sentence-initial words ("Email the report…", "Summarise…") as PERSON, so
+# PII-free prompts were redacted (100% of bench/'s clean_context tier). A place
+# name on its own does not identify anyone; a street address, or a place that
+# says where a person lives, does. Below: a format-based street-address
+# recognizer, and refine_ner_results(), which keeps a bare place name only in
+# residence/address context and trims command words out of PERSON spans.
+# ---------------------------------------------------------------------------
+
+_STREET_TYPES_EN = (
+    r"Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Way|Court|Ct|"
+    r"Place|Pl|Square|Sq|Terrace|Parkway|Pkwy|Highway|Hwy|Crescent|Close"
+)
+_CAP = r"[A-ZÀ-ÖØ-Þ][\w'.-]*"
+
+# Addresses are written the same way whatever language the sentence is in,
+# so every pattern is registered for every language pipeline.
+STREET_ADDRESS_PATTERNS = [
+    # 42 Baker Street · 1600 Pennsylvania Avenue · 500 Market St
+    Pattern(
+        name="STREET_ADDRESS_EN",
+        regex=rf"\b\d{{1,5}}[A-Za-z]?\s+(?:{_CAP}\s+){{0,3}}(?:{_STREET_TYPES_EN})\b\.?",
+        score=0.9,
+    ),
+    # Calle Gran Vía 28 · Avenida Diagonal 405 · Plaza Mayor 7
+    Pattern(
+        name="STREET_ADDRESS_ES",
+        regex=(
+            r"\b(?:Calle|C/|Avenida|Avda\.?|Plaza|Paseo|Camino|Carrera|Ronda|Travesía)"
+            rf"\s+(?:(?:de|del|la|las|los)\s+)?(?:{_CAP}\s+){{0,3}}\d{{1,5}}\b"
+        ),
+        score=0.9,
+    ),
+    # 12 Rue de Rivoli · 3 Avenue Jean Médecin · 8 Quai Saint-Vincent
+    Pattern(
+        name="STREET_ADDRESS_FR",
+        regex=(
+            r"\b\d{1,4}(?:\s*(?:bis|ter))?,?\s+"
+            r"(?:[Rr]ue|[Aa]venue|[Bb]oulevard|[Bb]d|[Qq]uai|[Pp]lace|[Cc]hemin|"
+            r"[Aa]llée|[Ii]mpasse|[Cc]ours)"
+            rf"\s+(?:(?:de|du|des|la|le)\s+|l'|d')?{_CAP}(?:\s+{_CAP})*"
+        ),
+        score=0.9,
+    ),
+    # Maximilianstraße 13 · Hauptstr. 4 · Am Waldweg 7a
+    Pattern(
+        name="STREET_ADDRESS_DE",
+        regex=(
+            r"\b(?:[A-ZÄÖÜ][\wäöüß-]*\s+)?[A-ZÄÖÜ][\wäöüß-]*"
+            r"(?:straße|strasse|str\.|weg|allee|platz|gasse|ring|damm|ufer|chaussee)"
+            r"\s+\d{1,4}[a-z]?\b"
+        ),
+        score=0.9,
+    ),
+    # 北京市朝阳区建国路88号
+    Pattern(
+        name="STREET_ADDRESS_ZH",
+        regex=(
+            r"[一-鿿]{2,8}?(?:市|省)[一-鿿]{0,10}?"
+            r"(?:路|街|道|巷)[0-9一二三四五六七八九十百]+号"
+        ),
+        score=0.9,
+    ),
+]
+
+
+def _street_address_recognizer(language: str) -> PatternRecognizer:
+    return PatternRecognizer(
+        supported_entity="LOCATION",
+        supported_language=language,
+        name="StreetAddressRecognizer",
+        patterns=STREET_ADDRESS_PATTERNS,
+    )
+
+
+# Words that put a place in a person's life: where they live, were born, or
+# receive mail. The place must follow the cue closely (at most three words,
+# no comma or "and" in between), so in "lives in Leeds and works in London"
+# only Leeds counts.
+_RESIDENCE_CUE = re.compile(
+    r"(?:\b(?:lives?|living|lived|resides?|residing|resident|home|address|"
+    r"born|hometown|grew\s+up|moved)\b"
+    r"|\b(?:vive|vivía|reside|domicilio|dirección|nació|natural|residente)\b"
+    r"|\b(?:habite|habitait|vit|réside|domicil\w*|adresse|née?)\b"
+    r"|\b(?:wohnt|wohnhaft|lebt|wohnort|anschrift|geboren|meldeadresse)\b)"
+    r"[:]?(?:\s+(?!(?:and|y|et|und)\b)[^\s,;.]+){0,3}\s*$"
+    r"|(?:住在|居住在|住址|地址|家住|出生于|户籍)[^\s，,。；;]{0,6}\s*$",
+    re.IGNORECASE,
+)
+
+# A house number right before or after a place name makes it part of an
+# address: "500 Market St", "Reeperbahn 22".
+_HOUSE_NUMBER_BEFORE = re.compile(r"\b\d{1,5}[A-Za-z]?,?\s+$")
+_HOUSE_NUMBER_AFTER = re.compile(r"^\s+\d{1,5}[a-z]?\b")
+
+# Command and business words spaCy mistakes for names when they start a
+# sentence. Deliberately excludes words that are also common given names
+# (Bill, Mark, Will, Grace, May, Chase, …): those stay redacted.
+NOT_A_NAME = {
+    # English
+    "email", "e-mail", "mail", "call", "text", "message", "ping", "remind",
+    "reply", "respond", "forward", "send", "ship", "book", "schedule",
+    "summarise", "summarize", "summary", "translate", "draft", "write",
+    "review", "check", "update", "invoice", "payment", "pay", "refund",
+    "order", "ticket", "report", "note", "notes", "meeting", "agenda",
+    "please", "thanks", "thank", "hi", "hello", "hey", "regards", "subject",
+    "customer", "customers", "support", "team", "sales", "billing", "admin",
+    "user", "client", "manager", "deliver", "cancel", "approve", "list",
+    "find", "search", "show", "create", "delete", "add", "remove", "fix",
+    "deploy", "release", "revenue", "budget", "contract", "plan",
+    # Spanish
+    "envía", "envíe", "envíen", "resume", "reserva", "llama", "escribe",
+    "hola", "gracias", "entreguen", "entrega", "paga", "factura",
+    # French
+    "envoie", "envoyez", "résume", "réserve", "appelle", "écris", "bonjour",
+    "merci", "livrez", "livre", "paie", "facture",
+    # German
+    "schicke", "schicken", "fasse", "buche", "rufe", "schreibe", "hallo",
+    "danke", "bitte", "liefern", "zahle", "rechnung",
+}  # fmt: skip
+
+_WORD = re.compile(r"\S+")
+
+
+def _trim_not_a_name(text: str, start: int, end: int) -> Optional[Tuple[int, int]]:
+    """Drop command words from the edges of a PERSON span; None if nothing is left."""
+    words = [
+        (m.start() + start, m.end() + start) for m in _WORD.finditer(text[start:end])
+    ]
+
+    def is_command_word(span: Tuple[int, int]) -> bool:
+        word = text[span[0] : span[1]].strip(".,;:!?\"'()")
+        return word.lower() in NOT_A_NAME
+
+    while words and is_command_word(words[0]):
+        words.pop(0)
+    while words and is_command_word(words[-1]):
+        words.pop()
+    if not words:
+        return None
+    return words[0][0], words[-1][1]
+
+
+# Language names spaCy tags NRP. Used as a language ("reply in French",
+# "translate into Spanish and Italian") they say nothing about a person, so
+# they are not redacted there. Nationality, religion and political group
+# elsewhere ("the Italian team", "a devout Catholic") stay redacted.
+LANGUAGE_NAMES = {
+    "english", "spanish", "french", "german", "italian", "portuguese", "dutch",
+    "japanese", "korean", "chinese", "mandarin", "cantonese", "arabic", "hindi",
+    "bengali", "urdu", "russian", "polish", "turkish", "swedish", "norwegian",
+    "danish", "finnish", "greek", "hebrew", "thai", "vietnamese", "indonesian",
+    "malay", "ukrainian", "czech", "romanian", "hungarian", "persian", "farsi",
+    "tagalog", "swahili",
+    # es / fr / de
+    "inglés", "español", "francés", "alemán", "italiano", "portugués",
+    "anglais", "espagnol", "français", "allemand", "italien", "portugais",
+    "englisch", "spanisch", "französisch", "deutsch", "italienisch",
+}  # fmt: skip
+
+# "in French", "into Spanish and Italian", "from Japanese to Korean", "al inglés"
+_LANGUAGE_BEFORE = re.compile(
+    r"\b(?:in|into|to|from|en|al|vers|auf|ins|nach)\s+"
+    r"(?:[^\s,;.]+\s*(?:,|\band\b|\bor\b|\by\b|\bet\b|\bund\b)\s*)*$",
+    re.IGNORECASE,
+)
+_LANGUAGE_AFTER = re.compile(
+    r"^\s+(?:translation|version|subtitles|speakers?|language|copy|text)\b",
+    re.IGNORECASE,
+)
+
+# Given names that are also place names. spaCy reads "Jordan approved the
+# budget" as the country, or finds nothing in "Charlotte signed the NDA". In a
+# person position (subject of a human action, or after "Ask"/"Hi") they are
+# names; in a place position ("in Jordan", "our Austin office") they are not.
+GIVEN_NAME_PLACES = {
+    "jordan", "georgia", "austin", "victoria", "charlotte", "florence",
+    "chelsea", "sydney", "dallas", "savannah", "madison", "brooklyn",
+    "phoenix", "dakota", "aurora", "houston", "denver", "lincoln", "jackson",
+    "orlando", "kingston", "raleigh", "adelaide", "alexandria", "augusta",
+    "virginia", "carolina", "india", "kenya", "regina", "eugene", "chester",
+}  # fmt: skip
+
+_HUMAN_ACTION = (
+    r"approved?|signed?|said|says|asked|asks|wrote|writes|emailed|called|texted|"
+    r"replied|confirmed|agreed|reviewed?|joined|resigned|mentioned|told|thinks|"
+    r"thought|wants|needs|sent|booked|scheduled|cancell?ed|left|quit|approve|"
+    r"sign|reply|confirm|call|email|send|join|is\s+out|is\s+on\s+leave"
+)
+_PERSON_AFTER = re.compile(
+    r"^\s*,?\s*(?:and\s+[A-Z][\w'-]+\s+)?"
+    r"(?:(?:will|would|can|could|should|must|may|might|just|has|had)\s+)?"
+    rf"(?:{_HUMAN_ACTION})\b"
+)
+_PERSON_BEFORE = re.compile(
+    r"\b(?:ask|tell|cc|ping|email|call|message|remind|thank|thanks|dear|hi|"
+    r"hello|hey|invite)\s+$",
+    re.IGNORECASE,
+)
+_PLACE_BEFORE = re.compile(r"\b(?:in|at|to|near|via|from|of)\s+$", re.IGNORECASE)
+_PLACE_AFTER = re.compile(
+    r"^\s+(?:office|team|branch|campus|airport|store|site|headquarters|hq|"
+    r"plant|warehouse|data\s+cent(?:er|re)|region|area|market|launch)\b",
+    re.IGNORECASE,
+)
+_CAPITALISED = re.compile(r"\b[A-Z][a-z]+\b")
+
+
+def _name_place_role(text: str, start: int, end: int) -> Optional[str]:
+    """'person' or 'place' for a GIVEN_NAME_PLACES word, None if unclear/not one."""
+    if text[start:end].lower() not in GIVEN_NAME_PLACES:
+        return None
+    before, after = text[:start], text[end:]
+    if _PLACE_BEFORE.search(before) or _PLACE_AFTER.match(after):
+        return "place"
+    if _PERSON_BEFORE.search(before) or _PERSON_AFTER.match(after):
+        return "person"
+    return None
+
+
+def _person(start: int, end: int, like: Any = None) -> Any:
+    """A PERSON finding, shaped like spaCy's so later filters treat it alike."""
+    return RecognizerResult(
+        entity_type="PERSON",
+        start=start,
+        end=end,
+        score=getattr(like, "score", 0.85),
+        recognition_metadata={"recognizer_name": "NamePlaceRule"},
+    )
+
+
+def refine_ner_results(text: str, results: List[Any]) -> List[Any]:
+    """Apply the precision rules above to analyzer output.
+
+    Only findings from the spaCy NER model are touched; pattern recognizers
+    (emails, cards, street addresses, …) pass through unchanged. Given names
+    that are also places get a PERSON finding in a person position even when
+    spaCy found nothing there.
+    """
+    refined: List[Any] = []
+    for r in results:
+        recognizer = (r.recognition_metadata or {}).get("recognizer_name")
+        if recognizer != "SpacyRecognizer":
+            refined.append(r)
+            continue
+
+        role = _name_place_role(text, r.start, r.end)
+
+        if r.entity_type == "PERSON":
+            if role == "place":
+                continue  # "our Austin office"
+            trimmed = _trim_not_a_name(text, r.start, r.end)
+            if trimmed is not None:
+                r.start, r.end = trimmed
+                refined.append(r)
+            continue
+
+        if r.entity_type == "NRP":
+            value = text[r.start : r.end].lower()
+            if value in LANGUAGE_NAMES and (
+                _LANGUAGE_BEFORE.search(text[: r.start])
+                or _LANGUAGE_AFTER.match(text[r.end :])
+            ):
+                continue  # used as a language
+            refined.append(r)
+            continue
+
+        if r.entity_type == "LOCATION":
+            if role == "person":
+                refined.append(_person(r.start, r.end, like=r))  # "Jordan approved…"
+                continue
+            if any(ch.isdigit() for ch in text[r.start : r.end]):
+                refined.append(r)
+                continue
+            before, after = text[: r.start], text[r.end :]
+            number_before = _HOUSE_NUMBER_BEFORE.search(before)
+            number_after = _HOUSE_NUMBER_AFTER.match(after)
+            if number_before or number_after:
+                # Part of an address: take the house number with it.
+                if number_before:
+                    r.start = number_before.start()
+                if number_after:
+                    r.end = r.end + number_after.end()
+                refined.append(r)
+            elif _RESIDENCE_CUE.search(before):
+                refined.append(r)
+            # Otherwise a bare place name, which is not PII on its own.
+            continue
+
+        refined.append(r)
+
+    # Name-places spaCy missed entirely ("Charlotte signed the NDA").
+    for m in _CAPITALISED.finditer(text):
+        if _name_place_role(text, m.start(), m.end()) != "person":
+            continue
+        if not any(r.start < m.end() and m.start() < r.end for r in refined):
+            refined.append(_person(m.start(), m.end()))
+    return refined
+
+
+def build_presidio():
+    """Initialize Presidio analyzer and anonymizer with custom recognizers.
+
+    Builds one NLP pipeline per configured language (PRESIDIO_LANGUAGES) and
+    registers both the predefined and the custom recognizers for each of them.
+    """
+    global SUPPORTED_LANGUAGES
+    try:
+        models = _resolve_language_models()
+        languages = [m["lang_code"] for m in models]
+
+        # Presidio 2.x expects a list of {lang_code, model_name}
+        nlp_engine = SpacyNlpEngine(models=models)
+        nlp_engine.load()
+
+        # The registry carries its own language list and Presidio rejects an
+        # analyzer whose languages differ from it; constructing the registry
+        # without this is what silently drops everything back to English.
+        registry = RecognizerRegistry(supported_languages=languages)
+        registry.load_predefined_recognizers(languages=languages, nlp_engine=nlp_engine)
+
+        for language in languages:
+            for recognizer in _custom_recognizers(language):
+                registry.add_recognizer(recognizer)
+
+            regions = PHONE_REGIONS_BY_LANGUAGE.get(language)
+            if regions:
+                registry.add_recognizer(
+                    PhoneRecognizer(
+                        supported_language=language,
+                        supported_regions=tuple(regions),
+                    )
+                )
+
+            # Presidio ships CreditCardRecognizer for en/es only. A card number
+            # is language-independent — Luhn does not care what language the
+            # sentence around it is in — so register it everywhere. Without
+            # this, a hinted fr/de/zh request leaks 61.5% of card numbers
+            # (measured in bench/).
+            if "CREDIT_CARD" not in registry.get_supported_entities([language]):
+                registry.add_recognizer(
+                    CreditCardRecognizer(supported_language=language)
+                )
 
         analyzer = AnalyzerEngine(
-            registry=registry, nlp_engine=nlp_engine, supported_languages=["en"]
+            registry=registry,
+            nlp_engine=nlp_engine,
+            supported_languages=languages,
         )
         anonymizer = AnonymizerEngine()
+        SUPPORTED_LANGUAGES = languages
         return analyzer, anonymizer
     except Exception as e:
         print(f"Failed to initialize Presidio: {e}")
@@ -315,7 +754,41 @@ ANONYMIZE_OPERATORS = {
     "PCI_EXPIRY": OperatorConfig("replace", {"new_value": "<PCI_EXPIRY>"}),
     "API_KEY": OperatorConfig("replace", {"new_value": "[REDACTED_API_KEY]"}),
     "JWT_TOKEN": OperatorConfig("replace", {"new_value": "[REDACTED_JWT]"}),
+    "PERSON": OperatorConfig("replace", {"new_value": "<USER_NAME>"}),
+    "LOCATION": OperatorConfig("replace", {"new_value": "<USER_LOCATION>"}),
+    "NRP": OperatorConfig("replace", {"new_value": "<USER_NRP>"}),
 }
+
+# Entity types the analyzer is asked for. Kept separate from
+# ANONYMIZE_OPERATORS because that mapping carries a "DEFAULT" key which is not
+# an entity type, and because the two lists have different reasons to change.
+#
+# ORGANIZATION and DATE_TIME are deliberately excluded. Both are recognised by
+# the spaCy pipeline but neither identifies a person on its own, and including
+# them redacted 61.5% of PII-free control text in bench/ — company names,
+# "quarterly", and "UTC" all match. Utility loss on that scale makes operators
+# turn redaction off entirely, which is a worse outcome than the entities being
+# left in place.
+DETECT_ENTITIES = [
+    "PERSON",
+    "LOCATION",
+    "NRP",
+    "EMAIL_ADDRESS",
+    "PHONE_NUMBER",
+    "CREDIT_CARD",
+    "IBAN_CODE",
+    "IP_ADDRESS",
+    "US_SSN",
+    "US_MEDICAL_RECORD_NUMBER",
+    "US_HEALTH_MEMBER_ID",
+    "US_NPI",
+    "US_DEA",
+    "US_DATE_OF_BIRTH",
+    "PCI_CVV",
+    "PCI_EXPIRY",
+    "API_KEY",
+    "JWT_TOKEN",
+]
 
 
 def entity_type_to_placeholder(entity_type: str) -> str:
@@ -336,26 +809,119 @@ def entity_type_to_placeholder(entity_type: str) -> str:
         "IBAN_CODE": "<USER_IBAN>",
         "API_KEY": "<API_KEY>",
         "JWT_TOKEN": "<JWT_TOKEN>",
+        "PERSON": "<USER_NAME>",
+        "LOCATION": "<USER_LOCATION>",
+        "NRP": "<USER_NRP>",
     }
     return entity_mapping.get(entity_type, f"<USER_{entity_type}>")
 
 
+def _languages_to_analyze(language: Optional[str]) -> List[str]:
+    """Which language pipelines to run for one request.
+
+    A caller-supplied language always wins when it is supported. Otherwise the
+    behaviour depends on PRESIDIO_LANGUAGE_MODE: "hint" analyses in the first
+    configured language only, "union" analyses in all of them.
+    """
+    supported = SUPPORTED_LANGUAGES or ["en"]
+    if language:
+        code = language.strip().lower()
+        if code in supported:
+            return [code]
+
+    mode = getattr(settings, "presidio_language_mode", "hint")
+    if mode == "union":
+        return list(supported)
+    return supported[:1]
+
+
+def _merge_results(results: List[Any]) -> List[Any]:
+    """Drop lower-confidence findings that overlap a higher-confidence one.
+
+    Union mode analyses the same text several times, so the same span comes
+    back once per language. Presidio's anonymizer tolerates duplicates but
+    reason codes and counts would double, so collapse them here.
+    """
+    ordered = sorted(results, key=lambda r: (-r.score, r.start, r.end))
+    kept: List[Any] = []
+    for candidate in ordered:
+        overlaps = any(
+            candidate.start < existing.end and existing.start < candidate.end
+            for existing in kept
+        )
+        if not overlaps:
+            kept.append(candidate)
+    return sorted(kept, key=lambda r: r.start)
+
+
+def language_hint(
+    tool_config: Optional[Dict] = None, policy_config: Optional[Dict] = None
+) -> Optional[str]:
+    """Extract the caller's language hint, if any.
+
+    SDK callers pass it as `tool_config.metadata.language`; a policy may also
+    pin a language for every request in an org. Neither is required — without a
+    hint, PRESIDIO_LANGUAGE_MODE decides.
+    """
+    if isinstance(tool_config, dict):
+        metadata = tool_config.get("metadata")
+        if isinstance(metadata, dict):
+            hinted = metadata.get("language")
+            if isinstance(hinted, str) and hinted.strip():
+                return hinted
+    if isinstance(policy_config, dict):
+        hinted = policy_config.get("language")
+        if isinstance(hinted, str) and hinted.strip():
+            return hinted
+    return None
+
+
+def analyze_text(
+    text: str,
+    language: Optional[str] = None,
+    entities: Optional[List[str]] = None,
+) -> List[Any]:
+    """Run the analyzer across the resolved languages and merge the findings.
+
+    Shared by the anonymization path and the two detection-only call sites so
+    that language handling cannot drift between them.
+    """
+    if not USE_PRESIDIO or ANALYZER is None:
+        return []
+
+    ents = entities or DETECT_ENTITIES
+    collected: List[Any] = []
+    for lang in _languages_to_analyze(language):
+        try:
+            collected.extend(ANALYZER.analyze(text=text, entities=ents, language=lang))
+        except Exception as exc:
+            print(f"Presidio analyze failed for language {lang!r}: {exc}")
+    return _merge_results(refine_ner_results(text, collected))
+
+
 def anonymize_text_presidio(
-    text: str, field_name: str = "", entities: Optional[List[str]] = None
+    text: str,
+    field_name: str = "",
+    entities: Optional[List[str]] = None,
+    language: Optional[str] = None,
 ) -> Tuple[str, List[str]]:
-    """Anonymize text using Presidio"""
+    """Anonymize text using Presidio.
+
+    `language` is the caller's hint (e.g. from tool_config.metadata). When it is
+    absent, PRESIDIO_LANGUAGE_MODE decides whether to analyse in the default
+    language only or in every configured language.
+    """
     if not USE_PRESIDIO or ANALYZER is None:
         return text, []
 
-    ents = entities or list(ANONYMIZE_OPERATORS.keys())
-    results = ANALYZER.analyze(text=text, entities=ents, language="en")
+    results = analyze_text(text, language=language, entities=entities)
     if not results:
         return text, []
 
     # Filter out false positives
     filtered_results = []
     for r in results:
-        if not is_false_positive(r.entity_type, field_name, text):
+        if not is_false_positive(r.entity_type, field_name, text[r.start : r.end]):
             filtered_results.append(r)
 
     if not filtered_results:
@@ -529,6 +1095,127 @@ def is_false_positive(entity_type: str, field_name: str, value: str) -> bool:
         # Don't filter out sequential numbers as they could be real SSNs
 
     return False
+
+
+# Tools denied unless an org's policy overrides the list. Names that no
+# legitimate integration carries: each one is a direct code-execution primitive.
+DEFAULT_DENY_TOOLS = [
+    "python.exec",
+    "bash.exec",
+    "code.exec",
+    "shell.exec",
+    "subprocess.run",
+    "subprocess.popen",
+    "os.system",
+    "child_process.exec",
+    "child_process.spawn",
+    "runtime.exec",
+]
+
+_TOOL_SEPARATORS = re.compile(r"[\s_\-/:]+")
+_TOOL_DOT_RUNS = re.compile(r"\.+")
+
+
+def normalize_tool_name(tool: str) -> str:
+    """Fold a tool name to a canonical dotted form.
+
+    Case, surrounding whitespace, and the choice of separator are presentation
+    details, not identity: `Python.Exec`, `python_exec`, `python-exec` and
+    ` python.exec ` all name the same primitive.
+    """
+    folded = _TOOL_SEPARATORS.sub(".", (tool or "").strip().lower())
+    return _TOOL_DOT_RUNS.sub(".", folded).strip(".")
+
+
+def is_denied_tool(tool: str, deny_tools: Optional[List[str]] = None) -> bool:
+    """Whether `tool` matches the denylist.
+
+    Replaces an exact `tool in deny_tools` membership test, which any of the
+    following walked straight past: `Python.Exec` (case), `python_exec`
+    (separator), `exec.python` (component order), `agent.python.exec.v2`
+    (namespacing). Denial is a security boundary, so matching is deliberately
+    generous — a false deny is a support ticket, a false allow is an incident.
+    """
+    normalized = normalize_tool_name(tool)
+    if not normalized:
+        return False
+
+    entries = DEFAULT_DENY_TOOLS if deny_tools is None else deny_tools
+    components = set(normalized.split("."))
+    padded = f".{normalized}."
+
+    for raw_entry in entries:
+        entry = normalize_tool_name(raw_entry if isinstance(raw_entry, str) else "")
+        if not entry:
+            continue
+
+        # Explicit wildcard: "shell.*" denies the whole namespace.
+        if entry.endswith(".*"):
+            prefix = entry[:-2]
+            if normalized == prefix or normalized.startswith(f"{prefix}."):
+                return True
+            continue
+
+        if normalized == entry:
+            return True
+
+        # Same components in a different order — exec.python vs python.exec.
+        if set(entry.split(".")) == components:
+            return True
+
+        # Denied name appearing inside a longer namespaced path.
+        if f".{entry}." in padded:
+            return True
+
+    return False
+
+
+def is_listed_tool(tool: str, tools: Optional[List[str]]) -> bool:
+    """Whether `tool` is named by an allow-style list.
+
+    Stricter than `is_denied_tool`: an allow entry widens what may run, so it
+    only matches the exact (normalised) name or an explicit `ns.*` wildcard.
+    """
+    normalized = normalize_tool_name(tool)
+    if not normalized or not tools:
+        return False
+    for raw_entry in tools:
+        entry = normalize_tool_name(raw_entry if isinstance(raw_entry, str) else "")
+        if not entry:
+            continue
+        if entry.endswith(".*"):
+            prefix = entry[:-2]
+            if normalized == prefix or normalized.startswith(f"{prefix}."):
+                return True
+        elif normalized == entry:
+            return True
+    return False
+
+
+# The dashboard policy UI speaks allow/block/redact/tokenize/confirm; the
+# evaluator historically spoke pass_through/deny/... Both are accepted
+# everywhere and folded to the evaluator's form here.
+_ACTION_ALIASES = {
+    "allow": "pass_through",
+    "pass": "pass_through",
+    "pass_through": "pass_through",
+    "passthrough": "pass_through",
+    "block": "deny",
+    "deny": "deny",
+    "redact": "redact",
+    "tokenize": "tokenize",
+    "confirm": "confirm",
+}
+
+
+def normalize_action(action: Any, default: Optional[str] = "redact") -> Optional[str]:
+    """Fold a policy action to pass_through|deny|redact|tokenize|confirm.
+
+    Unknown or missing actions return `default` rather than guessing.
+    """
+    if not isinstance(action, str):
+        return default
+    return _ACTION_ALIASES.get(action.strip().lower(), default)
 
 
 def redact_obj(
@@ -888,7 +1575,8 @@ def _evaluate_policy(
             redacted_text, reasons = anonymize_text_regex(raw_text)
         reasons = sorted(list(reasons))
         return {
-            "decision": "transform",
+            # Nothing detected means nothing transformed.
+            "decision": "transform" if redacted_text != raw_text else "allow",
             "raw_text_out": redacted_text,
             "reasons": reasons or None,
             "policy_id": "net-redact-presidio" if USE_PRESIDIO else "net-redact-regex",
@@ -914,35 +1602,39 @@ def evaluate_with_payload_policy(
 ) -> Dict:
     """
     Evaluate policy with the following precedence (ADR-005):
-      1. Payload `policy_config` if provided (backwards-compatible)
-      2. Dashboard-managed policy fetched by `org_id` from the shared DB
+      1. Dashboard-managed policy fetched by `org_id` from the shared DB
+      2. Payload `policy_config`, only when the org has no active policy
       3. Static YAML policy (legacy fallback)
+
+    The org's own policy must win: a caller holding an API key could
+    otherwise send a permissive `policy_config` and opt out of governance.
     """
 
-    if policy_config:
+    org_policy = None
+    if org_id:
+        try:
+            from .policy_source import get_active_policy
+
+            org_policy = get_active_policy(org_id)
+        except Exception as exc:  # never break the request path on a fetcher bug
+            org_policy = None
+            # Use module logger; import is local to avoid circular load risk.
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "policy_source fetch failed for org=%s err=%s", org_id, exc
+            )
+
+    if org_policy:
+        resolved_policy_config = deepcopy(org_policy)
+    elif policy_config:
         resolved_policy_config = deepcopy(policy_config)
     else:
-        org_policy = None
-        if org_id:
-            try:
-                from .policy_source import get_active_policy
-
-                org_policy = get_active_policy(org_id)
-            except Exception as exc:  # never break the request path on a fetcher bug
-                org_policy = None
-                # Use module logger; import is local to avoid circular load risk.
-                import logging as _logging
-
-                _logging.getLogger(__name__).warning(
-                    "policy_source fetch failed for org=%s err=%s", org_id, exc
-                )
-        resolved_policy_config = (
-            deepcopy(org_policy) if org_policy else deepcopy(get_policy())
-        )
+        resolved_policy_config = deepcopy(get_policy())
     resolved_policy_config["tool"] = tool
     resolved_policy_config["scope"] = scope or ""
 
-    return _evaluate_dynamic_policy(
+    result = _evaluate_dynamic_policy(
         tool,
         scope,
         raw_text,
@@ -953,6 +1645,12 @@ def evaluate_with_payload_policy(
         user_id,
         budget_context,
     )
+    # Which dashboard policy decided (None for payload/YAML policies). Not
+    # part of the HTTP response; the audit event uses it to link the
+    # Decision row to the org's Policy.
+    if resolved_policy_config.get("_policy_id"):
+        result["_policy_ref"] = resolved_policy_config["_policy_id"]
+    return result
 
 
 def _evaluate_dynamic_policy(
@@ -970,10 +1668,8 @@ def _evaluate_dynamic_policy(
 
     try:
         # PRECEDENCE LEVEL 1: Hard deny for dangerous tools
-        deny_tools = policy_config.get(
-            "deny_tools", ["python.exec", "bash.exec", "code.exec", "shell.exec"]
-        )
-        if tool in deny_tools:
+        deny_tools = policy_config.get("deny_tools", DEFAULT_DENY_TOOLS)
+        if is_denied_tool(tool, deny_tools):
             return {
                 "decision": "deny",
                 "raw_text_out": raw_text,
@@ -981,6 +1677,11 @@ def _evaluate_dynamic_policy(
                 "policy_id": "deny-exec",
                 "ts": now,
             }
+
+        # Tools the org explicitly allowed are exempt from a default
+        # block/confirm posture (PII handling still applies), which makes
+        # "default block + allow_tools" a plain allowlist.
+        explicitly_allowed = is_listed_tool(tool, policy_config.get("allow_tools"))
 
         # PRECEDENCE LEVEL 2: Tool-specific access rules
         tool_access = policy_config.get("tool_access", {})
@@ -1021,7 +1722,17 @@ def _evaluate_dynamic_policy(
 
         # PRECEDENCE LEVEL 3: Global defaults for this direction
         defaults = policy_config.get("defaults", {})
-        default_action = defaults.get(direction, {}).get("action", "redact")
+        direction_defaults = defaults.get(direction, {})
+        default_action = normalize_action(
+            (
+                direction_defaults.get("action")
+                if isinstance(direction_defaults, dict)
+                else None
+            ),
+            "redact",
+        )
+        if explicitly_allowed and default_action in ("deny", "confirm"):
+            default_action = "redact"
         return _apply_default_action_dynamic(
             default_action,
             raw_text,
@@ -1098,16 +1809,136 @@ def _apply_tool_specific_policy_dynamic(
     policy_config: Optional[Dict] = None,
     budget_context: Optional[Dict] = None,
 ) -> Dict:
-    """Apply tool-specific policy using dynamic configuration"""
+    """Apply a tool-specific rule.
 
-    # Run PII detection on raw text
-    findings = []
+    The rule's `action` decides the request:
+      - block   → deny, whatever the text contains
+      - confirm → confirm (a budget overrun still denies)
+      - allow / redact / tokenize → how detected PII is treated, unless
+        `allow_pii` overrides a type; a type set to block denies.
+    With no PII detected, allow/redact/tokenize all allow the request.
+    """
+    has_budget = bool(user_id and tool_config and policy_config and budget_context)
+    action = normalize_action(tool_policy.get("action"), None)
+
+    if action == "deny":
+        return {
+            "decision": "deny",
+            "raw_text_out": raw_text,
+            "reasons": ["tool-specific.block"],
+            "policy_id": "tool-access",
+            "ts": now,
+        }
+
+    if action == "confirm":
+        # Budget overrides confirm
+        if has_budget:
+            budget_result = _check_budget_and_apply(
+                user_id,
+                tool,
+                raw_text,
+                tool_config,
+                policy_config,
+                budget_context,
+                now,
+            )
+            if budget_result:
+                return budget_result
+
+        result = {
+            "decision": "confirm",
+            "raw_text_out": raw_text,
+            "reasons": ["tool-specific.confirm"],
+            "policy_id": "tool-access",
+            "ts": now,
+        }
+        if has_budget:
+            result = _add_budget_info_to_result(
+                result,
+                user_id,
+                tool,
+                raw_text,
+                tool_config,
+                policy_config,
+                budget_context,
+            )
+        return result
+
+    findings = _detect_pii_findings(raw_text, tool_config, policy_config)
+
+    if findings:
+        allow_pii = tool_policy.get("allow_pii", {}) or {}
+        pii_default = (
+            action if action in ("pass_through", "tokenize", "redact") else "redact"
+        )
+
+        # Any PII type set to block denies the entire request
+        for finding in findings:
+            pii_type = finding["type"]
+            if normalize_action(allow_pii.get(pii_type), pii_default) == "deny":
+                return {
+                    "decision": "deny",
+                    "raw_text_out": raw_text,
+                    "reasons": [f"pii.blocked:{pii_type.replace('PII:', '')}"],
+                    "policy_id": "tool-access",
+                    "ts": now,
+                }
+
+        transformed_text, tool_reasons = apply_tool_access_text_dynamic(
+            tool, findings, raw_text, allow_pii, pii_default
+        )
+        return {
+            "decision": "transform" if transformed_text != raw_text else "allow",
+            "raw_text_out": transformed_text,
+            "reasons": tool_reasons,
+            "policy_id": "tool-access",
+            "ts": now,
+        }
+
+    # No PII found: allow - but check budget first if user_id provided
+    result = {
+        "decision": "allow",
+        "raw_text_out": raw_text,
+        "policy_id": "tool-access",
+        "ts": now,
+    }
+    if has_budget:
+        budget_result = _check_budget_and_apply(
+            user_id,
+            tool,
+            raw_text,
+            tool_config,
+            policy_config,
+            budget_context,
+            now,
+        )
+        if budget_result:
+            return budget_result
+        result = _add_budget_info_to_result(
+            result,
+            user_id,
+            tool,
+            raw_text,
+            tool_config,
+            policy_config,
+            budget_context,
+        )
+    return result
+
+
+def _detect_pii_findings(
+    raw_text: str,
+    tool_config: Optional[Dict] = None,
+    policy_config: Optional[Dict] = None,
+) -> List[Dict]:
+    """Detect PII spans with Presidio, or the regex detectors when it is off."""
+    findings: List[Dict] = []
     if USE_PRESIDIO and ANALYZER is not None:
-        results = ANALYZER.analyze(
-            text=raw_text, entities=list(ANONYMIZE_OPERATORS.keys()), language="en"
+        results = analyze_text(
+            raw_text, language=language_hint(tool_config, policy_config)
         )
         for r in results:
-            if not is_false_positive(r.entity_type, "", raw_text):
+            if not is_false_positive(r.entity_type, "", raw_text[r.start : r.end]):
                 findings.append(
                     {
                         "type": f"PII:{r.entity_type.lower()}",
@@ -1117,170 +1948,54 @@ def _apply_tool_specific_policy_dynamic(
                         "text": raw_text[r.start : r.end],
                     }
                 )
-    else:
-        # Detect SSNs with context first so generic phone regexes cannot claim
-        # the same span before tokenization rules get a chance to run.
-        import re
+        return findings
 
-        ssn_patterns = [
-            r"\b\d{3}-\d{2}-\d{4}\b",  # XXX-XX-XXXX with dashes
-            r"\b(?!000|666|9\d{2})\d{3}[-]?(?!00)\d{2}[-]?(?!0000)\d{4}\b",  # With optional dashes
-            r"\b(?!000|666|9\d{2})\d{9}\b",  # 9 digits without dashes (if context suggests SSN)
-        ]
+    # Detect SSNs with context first so generic phone regexes cannot claim
+    # the same span before tokenization rules get a chance to run.
+    import re
 
-        ssn_context = re.search(
-            r"\b(ssn|social\s*security|tax\s*id|social\s*security\s*number)\b",
-            raw_text,
-            re.IGNORECASE,
-        )
+    ssn_patterns = [
+        r"\b\d{3}-\d{2}-\d{4}\b",  # XXX-XX-XXXX with dashes
+        r"\b(?!000|666|9\d{2})\d{3}[-]?(?!00)\d{2}[-]?(?!0000)\d{4}\b",  # With optional dashes
+        r"\b(?!000|666|9\d{2})\d{9}\b",  # 9 digits without dashes (if context suggests SSN)
+    ]
 
-        for pattern in ssn_patterns:
-            for match in re.finditer(pattern, raw_text):
-                if not ssn_context and "-" not in match.group():
-                    continue
-                if _has_overlap(match.start(), match.end(), findings):
-                    continue
-                findings.append(
-                    {
-                        "type": "PII:us_ssn",
-                        "start": match.start(),
-                        "end": match.end(),
-                        "score": 0.9 if ssn_context else 0.7,
-                        "text": match.group(),
-                    }
-                )
-                break
+    ssn_context = re.search(
+        r"\b(ssn|social\s*security|tax\s*id|social\s*security\s*number)\b",
+        raw_text,
+        re.IGNORECASE,
+    )
 
-        for finding in detect_regex_pii_findings(raw_text):
-            if _has_overlap(finding["start"], finding["end"], findings):
+    for pattern in ssn_patterns:
+        for match in re.finditer(pattern, raw_text):
+            if not ssn_context and "-" not in match.group():
                 continue
-            findings.append(finding)
-
-    # Apply tool-specific transformations based on findings and allow_pii rules
-    if findings:
-        allow_pii = tool_policy.get("allow_pii", {})
-
-        # Check if any PII type is set to "block" - if so, deny the entire request
-        for finding in findings:
-            pii_type = finding["type"]
-            action = allow_pii.get(pii_type, "redact")
-            if action == "block" or action == "deny":
-                return {
-                    "decision": "deny",
-                    "raw_text_out": raw_text,
-                    "reasons": [f"pii.blocked:{pii_type.replace('PII:', '')}"],
-                    "policy_id": "tool-access",
-                    "ts": now,
+            if _has_overlap(match.start(), match.end(), findings):
+                continue
+            findings.append(
+                {
+                    "type": "PII:us_ssn",
+                    "start": match.start(),
+                    "end": match.end(),
+                    "score": 0.9 if ssn_context else 0.7,
+                    "text": match.group(),
                 }
+            )
+            break
 
-        # No blocking actions, apply transformations
-        transformed_text, tool_reasons = apply_tool_access_text_dynamic(
-            tool, findings, raw_text, allow_pii
-        )
-        return {
-            "decision": "transform",
-            "raw_text_out": transformed_text,
-            "reasons": tool_reasons,
-            "policy_id": "tool-access",
-            "ts": now,
-        }
-    else:
-        # No PII found, check if tool has default action override
-        action = tool_policy.get("action")
-        if action == "deny" or action == "block":
-            # Budget check not needed for deny/block actions
-            return {
-                "decision": "deny",
-                "raw_text_out": raw_text,
-                "reasons": ["tool-specific.block"],
-                "policy_id": "tool-access",
-                "ts": now,
-            }
-        elif action == "tokenize":
-            tokenized_text = tokenize(raw_text)
-            return {
-                "decision": "transform",
-                "raw_text_out": tokenized_text,
-                "reasons": ["tool-specific.tokenize"],
-                "policy_id": "tool-access",
-                "ts": now,
-            }
-        elif action == "confirm":
-            # Check budget first - budget overrides confirm
-            if user_id and tool_config and policy_config and budget_context:
-                budget_result = _check_budget_and_apply(
-                    user_id,
-                    tool,
-                    raw_text,
-                    tool_config,
-                    policy_config,
-                    budget_context,
-                    now,
-                )
-                if budget_result:
-                    return budget_result
-
-            # If budget check passed, return confirm
-            result = {
-                "decision": "confirm",
-                "raw_text_out": raw_text,
-                "reasons": ["tool-specific.confirm"],
-                "policy_id": "tool-access",
-                "ts": now,
-            }
-
-            # Add budget info if available
-            if user_id and tool_config and policy_config and budget_context:
-                result = _add_budget_info_to_result(
-                    result,
-                    user_id,
-                    tool,
-                    raw_text,
-                    tool_config,
-                    policy_config,
-                    budget_context,
-                )
-
-            return result
-        else:
-            # Default: pass through - but check budget first if user_id provided
-            result = {
-                "decision": "allow",
-                "raw_text_out": raw_text,
-                "policy_id": "tool-access",
-                "ts": now,
-            }
-
-            # Check budget if user_id and tool_config provided
-            if user_id and tool_config and policy_config and budget_context:
-                budget_result = _check_budget_and_apply(
-                    user_id,
-                    tool,
-                    raw_text,
-                    tool_config,
-                    policy_config,
-                    budget_context,
-                    now,
-                )
-                if budget_result:
-                    return budget_result
-                else:
-                    # Add budget info to the result
-                    result = _add_budget_info_to_result(
-                        result,
-                        user_id,
-                        tool,
-                        raw_text,
-                        tool_config,
-                        policy_config,
-                        budget_context,
-                    )
-
-            return result
+    for finding in detect_regex_pii_findings(raw_text):
+        if _has_overlap(finding["start"], finding["end"], findings):
+            continue
+        findings.append(finding)
+    return findings
 
 
 def apply_tool_access_text_dynamic(
-    tool: str, findings: List[Dict], raw_text: str, allow_pii: Dict[str, str]
+    tool: str,
+    findings: List[Dict],
+    raw_text: str,
+    allow_pii: Dict[str, str],
+    default_action: str = "redact",
 ) -> Tuple[str, List[str]]:
     """Apply tool-specific text transformations using dynamic allow_pii rules"""
 
@@ -1296,8 +2011,8 @@ def apply_tool_access_text_dynamic(
         end = finding["end"]
         original_text = finding["text"]
 
-        # Check if this PII type is allowed for this tool
-        action = allow_pii.get(pii_type, "redact")  # Default to redact if not specified
+        # Per-type override, else the rule's own PII action
+        action = normalize_action(allow_pii.get(pii_type), default_action)
 
         if action == "pass_through":
             # Keep original text
@@ -1308,13 +2023,8 @@ def apply_tool_access_text_dynamic(
             token = tokenize(original_text)
             transformed = transformed[:start] + token + transformed[end:]
             reasons.extend(_tool_reason_codes("tokenized", pii_type))
-        elif action == "redact":
-            # Replace with placeholder
-            placeholder = f"[{pii_type.upper()}]"
-            transformed = transformed[:start] + placeholder + transformed[end:]
-            reasons.extend(_tool_reason_codes("redacted", pii_type))
-        elif action == "deny":
-            # This should be handled at a higher level, but just redact here
+        else:
+            # redact (and deny, which is handled at a higher level)
             placeholder = f"[{pii_type.upper()}]"
             transformed = transformed[:start] + placeholder + transformed[end:]
             reasons.extend(_tool_reason_codes("redacted", pii_type))
@@ -1366,6 +2076,26 @@ def _apply_default_action_dynamic(
             "policy_id": "defaults",
             "ts": now,
         }
+    elif action == "confirm":
+        if user_id and tool_config and policy_config and budget_context:
+            budget_result = _check_budget_and_apply(
+                user_id,
+                policy_config.get("tool", ""),
+                raw_text,
+                tool_config,
+                policy_config,
+                budget_context,
+                now,
+            )
+            if budget_result and budget_result["decision"] == "deny":
+                return budget_result
+        return {
+            "decision": "confirm",
+            "raw_text_out": raw_text,
+            "reasons": [f"default.{direction}.confirm"],
+            "policy_id": "defaults",
+            "ts": now,
+        }
 
     # PRECEDENCE LEVEL 4: Network scope redaction (net.* scopes or web.* tools)
     network_scopes = policy_config.get("network_scopes", ["net."])
@@ -1385,7 +2115,8 @@ def _apply_default_action_dynamic(
             redacted_text, reasons = anonymize_text_regex(raw_text)
         reasons = sorted(list(reasons))
         return {
-            "decision": "transform",
+            # Nothing detected means nothing transformed.
+            "decision": "transform" if redacted_text != raw_text else "allow",
             "raw_text_out": redacted_text,
             "reasons": reasons or None,
             "policy_id": "net-redact-presidio" if USE_PRESIDIO else "net-redact-regex",
@@ -1416,11 +2147,11 @@ def _apply_strict_fallback(
     # Detect standard PII types using Presidio or regex
     if USE_PRESIDIO and ANALYZER is not None:
         # Use Presidio to detect all standard PII types
-        results = ANALYZER.analyze(
-            text=raw_text, entities=list(ANONYMIZE_OPERATORS.keys()), language="en"
+        results = analyze_text(
+            raw_text, language=language_hint(tool_config, policy_config)
         )
         for r in results:
-            if not is_false_positive(r.entity_type, "", raw_text):
+            if not is_false_positive(r.entity_type, "", raw_text[r.start : r.end]):
                 all_findings.append(
                     {
                         "type": f"PII:{r.entity_type.lower()}",
