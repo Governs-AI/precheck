@@ -345,7 +345,198 @@ def _custom_recognizers(language: str) -> List[PatternRecognizer]:
         )
     )
 
+    recognizers.append(_street_address_recognizer(language))
+
     return recognizers
+
+
+# ---------------------------------------------------------------------------
+# NER precision (V2.14)
+#
+# spaCy's small models tag every country and city as LOCATION and many
+# sentence-initial words ("Email the report…", "Summarise…") as PERSON, so
+# PII-free prompts were redacted (100% of bench/'s clean_context tier). A place
+# name on its own does not identify anyone; a street address, or a place that
+# says where a person lives, does. Below: a format-based street-address
+# recognizer, and refine_ner_results(), which keeps a bare place name only in
+# residence/address context and trims command words out of PERSON spans.
+# ---------------------------------------------------------------------------
+
+_STREET_TYPES_EN = (
+    r"Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Way|Court|Ct|"
+    r"Place|Pl|Square|Sq|Terrace|Parkway|Pkwy|Highway|Hwy|Crescent|Close"
+)
+_CAP = r"[A-ZÀ-ÖØ-Þ][\w'.-]*"
+
+# Addresses are written the same way whatever language the sentence is in,
+# so every pattern is registered for every language pipeline.
+STREET_ADDRESS_PATTERNS = [
+    # 42 Baker Street · 1600 Pennsylvania Avenue · 500 Market St
+    Pattern(
+        name="STREET_ADDRESS_EN",
+        regex=rf"\b\d{{1,5}}[A-Za-z]?\s+(?:{_CAP}\s+){{0,3}}(?:{_STREET_TYPES_EN})\b\.?",
+        score=0.9,
+    ),
+    # Calle Gran Vía 28 · Avenida Diagonal 405 · Plaza Mayor 7
+    Pattern(
+        name="STREET_ADDRESS_ES",
+        regex=(
+            r"\b(?:Calle|C/|Avenida|Avda\.?|Plaza|Paseo|Camino|Carrera|Ronda|Travesía)"
+            rf"\s+(?:(?:de|del|la|las|los)\s+)?(?:{_CAP}\s+){{0,3}}\d{{1,5}}\b"
+        ),
+        score=0.9,
+    ),
+    # 12 Rue de Rivoli · 3 Avenue Jean Médecin · 8 Quai Saint-Vincent
+    Pattern(
+        name="STREET_ADDRESS_FR",
+        regex=(
+            r"\b\d{1,4}(?:\s*(?:bis|ter))?,?\s+"
+            r"(?:[Rr]ue|[Aa]venue|[Bb]oulevard|[Bb]d|[Qq]uai|[Pp]lace|[Cc]hemin|"
+            r"[Aa]llée|[Ii]mpasse|[Cc]ours)"
+            rf"\s+(?:(?:de|du|des|la|le)\s+|l'|d')?{_CAP}(?:\s+{_CAP})*"
+        ),
+        score=0.9,
+    ),
+    # Maximilianstraße 13 · Hauptstr. 4 · Am Waldweg 7a
+    Pattern(
+        name="STREET_ADDRESS_DE",
+        regex=(
+            r"\b(?:[A-ZÄÖÜ][\wäöüß-]*\s+)?[A-ZÄÖÜ][\wäöüß-]*"
+            r"(?:straße|strasse|str\.|weg|allee|platz|gasse|ring|damm|ufer|chaussee)"
+            r"\s+\d{1,4}[a-z]?\b"
+        ),
+        score=0.9,
+    ),
+    # 北京市朝阳区建国路88号
+    Pattern(
+        name="STREET_ADDRESS_ZH",
+        regex=(
+            r"[一-鿿]{2,8}?(?:市|省)[一-鿿]{0,10}?"
+            r"(?:路|街|道|巷)[0-9一二三四五六七八九十百]+号"
+        ),
+        score=0.9,
+    ),
+]
+
+
+def _street_address_recognizer(language: str) -> PatternRecognizer:
+    return PatternRecognizer(
+        supported_entity="LOCATION",
+        supported_language=language,
+        name="StreetAddressRecognizer",
+        patterns=STREET_ADDRESS_PATTERNS,
+    )
+
+
+# Words that put a place in a person's life: where they live, were born, or
+# receive mail. The place must follow the cue closely (at most three words,
+# no comma or "and" in between), so in "lives in Leeds and works in London"
+# only Leeds counts.
+_RESIDENCE_CUE = re.compile(
+    r"(?:\b(?:lives?|living|lived|resides?|residing|resident|home|address|"
+    r"born|hometown|grew\s+up|moved)\b"
+    r"|\b(?:vive|vivía|reside|domicilio|dirección|nació|natural|residente)\b"
+    r"|\b(?:habite|habitait|vit|réside|domicil\w*|adresse|née?)\b"
+    r"|\b(?:wohnt|wohnhaft|lebt|wohnort|anschrift|geboren|meldeadresse)\b)"
+    r"[:]?(?:\s+(?!(?:and|y|et|und)\b)[^\s,;.]+){0,3}\s*$"
+    r"|(?:住在|居住在|住址|地址|家住|出生于|户籍)[^\s，,。；;]{0,6}\s*$",
+    re.IGNORECASE,
+)
+
+# A house number right before or after a place name makes it part of an
+# address: "500 Market St", "Reeperbahn 22".
+_HOUSE_NUMBER_BEFORE = re.compile(r"\b\d{1,5}[A-Za-z]?,?\s+$")
+_HOUSE_NUMBER_AFTER = re.compile(r"^\s+\d{1,5}[a-z]?\b")
+
+# Command and business words spaCy mistakes for names when they start a
+# sentence. Deliberately excludes words that are also common given names
+# (Bill, Mark, Will, Grace, May, Chase, …): those stay redacted.
+NOT_A_NAME = {
+    # English
+    "email", "e-mail", "mail", "call", "text", "message", "ping", "remind",
+    "reply", "respond", "forward", "send", "ship", "book", "schedule",
+    "summarise", "summarize", "summary", "translate", "draft", "write",
+    "review", "check", "update", "invoice", "payment", "pay", "refund",
+    "order", "ticket", "report", "note", "notes", "meeting", "agenda",
+    "please", "thanks", "thank", "hi", "hello", "hey", "regards", "subject",
+    "customer", "customers", "support", "team", "sales", "billing", "admin",
+    "user", "client", "manager", "deliver", "cancel", "approve", "list",
+    "find", "search", "show", "create", "delete", "add", "remove", "fix",
+    "deploy", "release", "revenue", "budget", "contract", "plan",
+    # Spanish
+    "envía", "envíe", "envíen", "resume", "reserva", "llama", "escribe",
+    "hola", "gracias", "entreguen", "entrega", "paga", "factura",
+    # French
+    "envoie", "envoyez", "résume", "réserve", "appelle", "écris", "bonjour",
+    "merci", "livrez", "livre", "paie", "facture",
+    # German
+    "schicke", "schicken", "fasse", "buche", "rufe", "schreibe", "hallo",
+    "danke", "bitte", "liefern", "zahle", "rechnung",
+}  # fmt: skip
+
+_WORD = re.compile(r"\S+")
+
+
+def _trim_not_a_name(text: str, start: int, end: int) -> Optional[Tuple[int, int]]:
+    """Drop command words from the edges of a PERSON span; None if nothing is left."""
+    words = [
+        (m.start() + start, m.end() + start) for m in _WORD.finditer(text[start:end])
+    ]
+
+    def is_command_word(span: Tuple[int, int]) -> bool:
+        word = text[span[0] : span[1]].strip(".,;:!?\"'()")
+        return word.lower() in NOT_A_NAME
+
+    while words and is_command_word(words[0]):
+        words.pop(0)
+    while words and is_command_word(words[-1]):
+        words.pop()
+    if not words:
+        return None
+    return words[0][0], words[-1][1]
+
+
+def refine_ner_results(text: str, results: List[Any]) -> List[Any]:
+    """Apply the precision rules above to analyzer output.
+
+    Only findings from the spaCy NER model are touched; pattern recognizers
+    (emails, cards, street addresses, …) pass through unchanged.
+    """
+    refined: List[Any] = []
+    for r in results:
+        recognizer = (r.recognition_metadata or {}).get("recognizer_name")
+        if recognizer != "SpacyRecognizer":
+            refined.append(r)
+            continue
+
+        if r.entity_type == "PERSON":
+            trimmed = _trim_not_a_name(text, r.start, r.end)
+            if trimmed is not None:
+                r.start, r.end = trimmed
+                refined.append(r)
+            continue
+
+        if r.entity_type == "LOCATION":
+            if any(ch.isdigit() for ch in text[r.start : r.end]):
+                refined.append(r)
+                continue
+            before, after = text[: r.start], text[r.end :]
+            number_before = _HOUSE_NUMBER_BEFORE.search(before)
+            number_after = _HOUSE_NUMBER_AFTER.match(after)
+            if number_before or number_after:
+                # Part of an address: take the house number with it.
+                if number_before:
+                    r.start = number_before.start()
+                if number_after:
+                    r.end = r.end + number_after.end()
+                refined.append(r)
+            elif _RESIDENCE_CUE.search(before):
+                refined.append(r)
+            # Otherwise a bare place name, which is not PII on its own.
+            continue
+
+        refined.append(r)
+    return refined
 
 
 def build_presidio():
@@ -590,7 +781,7 @@ def analyze_text(
             collected.extend(ANALYZER.analyze(text=text, entities=ents, language=lang))
         except Exception as exc:
             print(f"Presidio analyze failed for language {lang!r}: {exc}")
-    return _merge_results(collected)
+    return _merge_results(refine_ner_results(text, collected))
 
 
 def anonymize_text_presidio(

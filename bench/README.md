@@ -37,6 +37,19 @@ identifiers), `partial` (last-4, initials, year-only DOB), `obfuscated` (spaced,
 spelled-out), `structured` (PII nested in JSON tool arguments at depth 1–4), and
 `clean` (no PII at all — the over-redaction control).
 
+**Precision regression cases (V2.14).** 129 more items, generated with their
+own RNG and appended, so the original 438 are byte-identical
+(`--no-regression` runs the original set alone):
+
+- `clean_context`: 27 PII-free prompts that spaCy mislabels: countries and
+  cities ("Summarise the release notes for France and Germany") and
+  sentence-initial command words ("Email the report…", "Payment terms…").
+  Counted in `over_redact`.
+- `context`: 102 items of real PII next to the same words, the other side of
+  the trade-off: names after command words, street addresses with no
+  residence cue, and a city when it says where someone lives ("lives in
+  Leeds").
+
 ## Arms
 
 | Arm | What it is |
@@ -53,8 +66,14 @@ spelled-out), `structured` (PII nested in JSON tool arguments at depth 1–4), a
 `leakage` is the headline: the fraction of ground-truth PII values that survive
 verbatim in the output. Per value, not per span-overlap — an operator cares
 whether the SSN left, not how many characters matched. `over_redact` is the
-utility counterweight, measured on the clean tier: a layer that redacts
-everything has zero leakage and zero value, and operators switch it off.
+utility counterweight, measured on the PII-free tiers (`clean`,
+`clean_context`): a layer that redacts everything has zero leakage and zero
+value, and operators switch it off.
+
+`LOCATION_STREET` is a stricter line for addresses. A full address such as
+`42 Baker Street, London` counts as caught under `leakage` once any part is
+replaced, even if only the city was. This line asks whether the street part
+itself survived.
 
 ## Results
 
@@ -70,6 +89,37 @@ PERSON and LOCATION went from 100% leakage to 11.6% and 11.7%. The
 high-sensitivity figure is the one to watch: it covers the entity families that
 regulated customers are buying redaction for, and 89.1% of them used to pass
 through untouched.
+
+### V2.14 — place names and command words (2026-10-25)
+
+`fixed` arm, five languages. Catch rate = 1 − leakage.
+
+| Corpus | catch rate | high-sensitivity catch | street addresses caught | over-redaction |
+|---|---|---|---|---|
+| original 438, before | 91.7% | 89.4% | 70.0% | 0.0% |
+| original 438, after | **92.9%** | **91.5%** | **100%** | 0.0% |
+| with regression cases (567), before | 92.7% | 91.7% | 70.8% | **25.7%** (clean_context: 100%) |
+| with regression cases (567), after | **93.6%** | **93.2%** | **100%** | **0.9%** (clean_context: 3.7%) |
+
+The two causes were spaCy NER tagging every country and city as LOCATION, and
+sentence-initial words ("Email", "Summarise") as PERSON. Three changes fixed
+them:
+
+- A bare place name is kept only in residence context.
+- Command words are trimmed from PERSON spans.
+- A format-based street-address recognizer (en/es/fr/de/zh) was added.
+
+The recognizer is what raised recall. Before it, `42 Baker Street` passed
+through and only `London` was replaced, so most "caught" addresses had leaked
+their street.
+
+Per value, no PII value that was caught before leaks after: leaked values went
+from 55 to 48, with 0 newly leaked. PERSON leakage is unchanged at 10.4%.
+
+The one remaining over-redaction is "…into Spanish and Italian": spaCy tags
+the language as NRP. A single first name that spaCy tags as a place
+("Jordan approved the budget") is no longer redacted. Before the fix it was
+redacted only because spaCy treated it as a place.
 
 ## Known residual gaps
 

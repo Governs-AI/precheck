@@ -37,7 +37,12 @@ TIERS = [
     "obfuscated",  # spaced / spelled-out / separator-mangled surface forms
     "structured",  # PII inside nested JSON tool arguments
     "clean",  # no PII at all — over-redaction control
+    "clean_context",  # no PII, but place names and capitalised common words
+    "context",  # PII next to place names / command words (precision-fix guard)
 ]
+
+# Tiers with no PII. over_redact is measured on all of them.
+CLEAN_TIERS = {"clean", "clean_context"}
 
 
 @dataclass
@@ -484,8 +489,165 @@ INLINE_TRUTH: Dict[str, List[Tuple[str, str]]] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Regression cases for the precision fix (V2.14)
+#
+# `clean_context` is PII-free text that spaCy NER mislabels: countries and
+# cities tagged LOCATION, sentence-initial command words ("Email", "Summarise")
+# tagged PERSON. `context` is the other side of the trade-off: real PII next to
+# the same words, which the fix must still catch, including a city when it says
+# where a person lives. Generated with their own RNG and appended after the
+# original corpus, so the original 438 items are unchanged.
+# ---------------------------------------------------------------------------
+
+CITIES = {
+    "en": ["Springfield", "Leeds", "Austin"],
+    "es": ["Sevilla", "Valencia", "Bilbao"],
+    "fr": ["Toulouse", "Nantes", "Lille"],
+    "de": ["Köln", "Dresden", "Leipzig"],
+    "zh": ["成都", "杭州", "南京"],
+}
+
+CONTEXT_SLOTS = {
+    "CITY": lambda rng, lang: rng.choice(CITIES[lang]),
+}
+CONTEXT_TYPES = {"CITY": "LOCATION"}
+
+CONTEXT_TEMPLATES: Dict[str, Dict[str, List[str]]] = {
+    "en": {
+        "clean_context": [
+            "Summarise the release notes for France and Germany.",
+            "Email the quarterly report to the team before Friday.",
+            "Book a flight from New York to Tokyo for the offsite.",
+            "Revenue in Brazil grew faster than in India this quarter.",
+            "Our London office ships the Paris launch on Monday.",
+            "Payment terms for customers in Canada are net 30.",
+            "Translate the onboarding guide into Spanish and Italian.",
+            "Draft a reply to Customer Support about the Berlin outage.",
+            "Invoice 7 covers the Singapore and Sydney data centres.",
+            "Schedule the review with the Madrid and Lisbon teams.",
+            "Call out the risks for the Europe and Asia rollout.",
+            "Message the Chicago team when the Dublin build is green.",
+        ],
+        "context": [
+            "Email {PERSON} the France launch plan by Friday.",
+            "{PERSON} called about the Paris office move.",
+            "Patient {PERSON} lives in {CITY} and travels to London for work.",
+            "Deliver the contract to {LOCATION} before the Tokyo trip.",
+            "Remind {PERSON} that the Berlin summit starts Monday.",
+            "The customer moved to {CITY}; send the forms to {LOCATION}.",
+        ],
+    },
+    "es": {
+        "clean_context": [
+            "Resume las notas de la versión para Francia y Alemania.",
+            "Los ingresos en Brasil crecieron más que en México.",
+            "Reserva un vuelo de Madrid a Lisboa para el equipo.",
+            "La oficina de Barcelona lanza el producto en Chile el lunes.",
+        ],
+        "context": [
+            "Envía a {PERSON} el plan de lanzamiento en Francia.",
+            "El paciente {PERSON} vive en {CITY} y viaja a Madrid por trabajo.",
+            "Entreguen el contrato en {LOCATION} antes del viaje a Lima.",
+        ],
+    },
+    "fr": {
+        "clean_context": [
+            "Résume les notes de version pour la France et l'Allemagne.",
+            "Le chiffre d'affaires au Brésil a dépassé celui de l'Inde.",
+            "Réserve un vol de Paris à Montréal pour l'équipe.",
+            "Le bureau de Lyon lance le produit en Belgique lundi.",
+        ],
+        "context": [
+            "Envoie à {PERSON} le plan de lancement pour l'Espagne.",
+            "Le patient {PERSON} habite à {CITY} et travaille à Paris.",
+            "Livrez le contrat au {LOCATION} avant le voyage à Genève.",
+        ],
+    },
+    "de": {
+        "clean_context": [
+            "Fasse die Versionshinweise für Frankreich und Spanien zusammen.",
+            "Der Umsatz in Brasilien wuchs schneller als in Indien.",
+            "Buche einen Flug von Berlin nach Wien für das Team.",
+            "Das Büro in München startet das Produkt am Montag in Österreich.",
+        ],
+        "context": [
+            "Schicke {PERSON} den Plan für den Start in Frankreich.",
+            "Der Patient {PERSON} wohnt in {CITY} und arbeitet in Berlin.",
+            "Liefern Sie den Vertrag an {LOCATION} vor der Reise nach Wien.",
+        ],
+    },
+    "zh": {
+        "clean_context": [
+            "请总结法国和德国的版本说明。",
+            "巴西的收入增长快于印度。",
+            "为团队预订从北京到上海的航班。",
+        ],
+        "context": [
+            "患者 {PERSON} 住在 {CITY}，在北京工作。",
+            "请把合同送到 {LOCATION}，然后去上海出差。",
+        ],
+    },
+}
+
+
+def _render_context(
+    template: str, rng: random.Random, lang: str
+) -> Tuple[str, List[Span]]:
+    """`render` plus the CITY slot, recorded as a LOCATION span."""
+    out: List[str] = []
+    spans: List[Span] = []
+    pos = 0
+    cursor = 0
+    for m in SLOT_RE.finditer(template):
+        literal = template[cursor : m.start()]
+        out.append(literal)
+        pos += len(literal)
+        slot = m.group(1)
+        pool = CONTEXT_SLOTS.get(slot) or SLOT_POOLS[slot]
+        value = pool(rng, lang)
+        spans.append(
+            Span(
+                start=pos,
+                end=pos + len(value),
+                type=CONTEXT_TYPES.get(slot, slot),
+                value=value,
+            )
+        )
+        out.append(value)
+        pos += len(value)
+        cursor = m.end()
+    out.append(template[cursor:])
+    return "".join(out), spans
+
+
+def _context_items(langs: List[str], per_template: int) -> List[Item]:
+    rng = random.Random(SEED + 1)
+    items: List[Item] = []
+    counter = 0
+    for lang in langs:
+        for tier in ["clean_context", "context"]:
+            for template in CONTEXT_TEMPLATES.get(lang, {}).get(tier, []):
+                # Clean templates have no slots, so one rendering each.
+                for _ in range(per_template if "{" in template else 1):
+                    text, spans = _render_context(template, rng, lang)
+                    items.append(
+                        Item(
+                            id=f"{lang}-{tier}-{counter:04d}",
+                            lang=lang,
+                            tier=tier,
+                            text=text,
+                            spans=spans,
+                        )
+                    )
+                    counter += 1
+    return items
+
+
 def build(
-    per_template: int = 6, languages: Optional[Iterable[str]] = None
+    per_template: int = 6,
+    languages: Optional[Iterable[str]] = None,
+    regression: bool = True,
 ) -> List[Item]:
     """Generate the corpus. Deterministic for a fixed SEED."""
     rng = random.Random(SEED)
@@ -536,6 +698,8 @@ def build(
         items.extend(_structured_items(rng, lang, per_template * 2, counter))
         counter += per_template * 2
 
+    if regression:
+        items.extend(_context_items(langs, per_template))
     return items
 
 

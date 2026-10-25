@@ -67,7 +67,10 @@ class TestPersonAndLocationRedaction:
         out, _ = anonymize_text_presidio(
             "Ship the cheque to 1600 Pennsylvania Avenue, Washington DC.", language="en"
         )
-        assert "Washington DC" not in out
+        # The street address is the identifying part. Before V2.14 only the
+        # city was replaced and "1600 Pennsylvania Avenue" leaked; a bare city
+        # is no longer treated as PII (see tests/test_pii_precision.py).
+        assert "1600 Pennsylvania Avenue" not in out
 
     def test_clean_text_survives(self):
         """Utility control: no PII in, nothing redacted out."""

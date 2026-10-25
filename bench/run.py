@@ -13,7 +13,7 @@ leakage       fraction of ground-truth PII values that survive verbatim in the
               output. This is the safety metric: one surviving value is a
               disclosure regardless of how many others were caught.
 item_leakage  fraction of items where at least one value survived.
-over_redact   fraction of clean-tier items (no PII) that were modified anyway.
+over_redact   fraction of PII-free items (clean, clean_context) modified anyway.
 latency_ms    per-call wall clock, p50/p95.
 
 Leakage is deliberately the headline rather than span F1: an operator cares
@@ -30,7 +30,7 @@ import time
 from collections import defaultdict
 from typing import Callable, Dict, List, Optional, Tuple
 
-from bench.corpus import HIGH_SENSITIVITY, Item, build
+from bench.corpus import CLEAN_TIERS, HIGH_SENSITIVITY, Item, build
 
 Arm = Callable[[str, str], Tuple[str, List[str]]]
 
@@ -213,6 +213,14 @@ def score_item(item: Item, out: str) -> Tuple[int, int, List[str]]:
     return leaked, len(item.spans), types
 
 
+def _street_part(span) -> Optional[str]:
+    """`42 Baker Street` of `42 Baker Street, London`; None for a bare place."""
+    value = span.value.replace("，", ",")
+    if any(ch.isdigit() for ch in value):
+        return value.split(",")[0].strip() if "," in value else value
+    return None
+
+
 def run_arm(name: str, arm: Arm, items: List[Item]) -> Dict[str, object]:
     overall = Accumulator()
     by_lang: Dict[str, Accumulator] = defaultdict(Accumulator)
@@ -240,7 +248,7 @@ def run_arm(name: str, arm: Arm, items: List[Item]) -> Dict[str, object]:
             acc.items_total += 1
             if leaked:
                 acc.items_leaked += 1
-            if item.tier == "clean":
+            if item.tier in CLEAN_TIERS:
                 acc.clean_total += 1
                 if out != item.text:
                     acc.clean_modified += 1
@@ -250,6 +258,14 @@ def run_arm(name: str, arm: Arm, items: List[Item]) -> Dict[str, object]:
             overall.by_entity[etype][1] += 1
             if span.value in out:
                 overall.by_entity[etype][0] += 1
+            # A full address counts as caught once any part of it is replaced,
+            # e.g. only the city. This stricter line asks whether the street
+            # part itself survived.
+            street = _street_part(span) if etype == "LOCATION" else None
+            if street:
+                overall.by_entity["LOCATION_STREET"][1] += 1
+                if street in out:
+                    overall.by_entity["LOCATION_STREET"][0] += 1
             if etype in HIGH_SENSITIVITY:
                 high_sens.spans_total += 1
                 if span.value in out:
@@ -313,6 +329,16 @@ def print_report(results: Dict[str, Dict[str, object]]) -> None:
         )
         print(f"{arm:<24}{row}")
 
+    print("\n=== Over-redaction by PII-free tier ===\n")
+    clean_tiers = [t for t in tiers if t in CLEAN_TIERS]
+    print(f"{'arm':<24}" + "".join(f"{t:>18}" for t in clean_tiers))
+    for arm in arms:
+        row = "".join(
+            f"{fmt_pct(results[arm]['by_tier'].get(t, {}).get('over_redact')):>18}"
+            for t in clean_tiers
+        )
+        print(f"{arm:<24}{row}")
+
     print("\n=== Leakage by entity type ===\n")
     ents = sorted({e for arm in arms for e in results[arm]["by_entity"]})
     print(f"{'entity':<28}" + "".join(f"{a[:16]:>22}" for a in arms))
@@ -330,9 +356,18 @@ def main() -> int:
     ap.add_argument("--languages", nargs="*", default=None)
     ap.add_argument("--per-template", type=int, default=6)
     ap.add_argument("--json", dest="json_out", default=None)
+    ap.add_argument(
+        "--no-regression",
+        action="store_true",
+        help="original 438-item corpus only (skip the V2.14 context cases)",
+    )
     args = ap.parse_args()
 
-    items = build(per_template=args.per_template, languages=args.languages)
+    items = build(
+        per_template=args.per_template,
+        languages=args.languages,
+        regression=not args.no_regression,
+    )
     print(
         f"corpus: {len(items)} items, {sum(len(i.spans) for i in items)} annotated spans"
     )

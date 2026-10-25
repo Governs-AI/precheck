@@ -622,12 +622,29 @@ The policy evaluation system follows a strict precedence hierarchy (highest to l
 | Credit Card | `CREDIT_CARD` | `4111-1111-1111-1111` |
 | API Key | `API_KEY` | `sk-1234567890abcdef` |
 | JWT Token | `JWT_TOKEN` | `eyJhbGciOiJIUzI1NiIs...` |
+| Name | `PERSON` (spaCy NER) | `Maria Garcia` |
+| Street address / place of residence | `LOCATION` (address recognizer + spaCy NER) | `42 Baker Street`, "lives in Leeds" |
+| Nationality / religion / political group | `NRP` (spaCy NER) | |
 
 ### Detection Methods
 
 1. **Presidio (Primary)**: Advanced NLP-based detection with custom recognizers
 2. **Regex (Fallback)**: Pattern-based detection when Presidio unavailable
 3. **Context-aware filtering**: Reduces false positives based on field names and patterns
+4. **NER precision** (`refine_ner_results`, applied in `analyze_text` so every
+   detection path gets it):
+   - A bare place name (France, Paris, New York) is not PII and passes
+     through. It stays redacted when it follows a residence cue ("lives in",
+     "born in", "vive en", "habite à", "wohnt in", "住在", …) or sits next to
+     a house number.
+   - Command and business words ("Email", "Summarise", "Payment", …;
+     `NOT_A_NAME`, which excludes words that are also given names) are trimmed
+     out of PERSON spans.
+   - `StreetAddressRecognizer`: format-based street addresses for en/es/fr/de/zh,
+     registered for every language pipeline.
+   - Measured in `bench/` (tiers `clean_context`, `context`): over-redaction
+     went from 25.7% to 0.9% and catch rate from 92.7% to 93.6%, with no
+     newly leaked value. See `bench/README.md`.
 
 ## Tokenization
 
@@ -1153,6 +1170,14 @@ curl -X POST http://localhost:8080/api/v1/postcheck \
 ```
 
 ## Recent Changes Log
+- **2026-10-25**: **PII precision (V2.14).** Place names and sentence-initial
+  command words are no longer redacted: `refine_ner_results` keeps a bare
+  LOCATION only in residence/address context and trims `NOT_A_NAME` words from
+  PERSON spans. A new street-address recognizer catches the street itself,
+  which used to leak while only the city was replaced. The bench gained
+  `clean_context`/`context` tiers and a `LOCATION_STREET` line. Results:
+  over-redaction 25.7% → 0.9%, catch rate 92.7% → 93.6%, street addresses
+  caught 70.8% → 100%, 0 newly leaked values. Tests: `tests/test_pii_precision.py`.
 - **2026-10-25**: **Dashboard keys are read from the dashboard, by hash.** The
   dashboard now stores only SHA-256 + a 12-char prefix (`APIKey.keyHash`,
   `keyPrefix`) and no longer syncs HMAC copies into `api_keys`. Precheck checks
