@@ -95,6 +95,9 @@ class Settings(BaseSettings):
     webhook_timeout_s: float = 2.5
     webhook_max_retries: int = 3
     webhook_backoff_base_ms: int = 150
+    # Include the redacted output of transform decisions in the audit event
+    # (Decision.payloadOut). Raw input is never sent — only its sha256.
+    audit_include_redacted_output: bool = True
 
     # PII tokenization — REQUIRED in production; must not be the default value.
     # WARNING: any PII tokens previously generated with the default salt are

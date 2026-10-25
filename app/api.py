@@ -5,7 +5,7 @@ import logging
 import os
 import secrets
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
 from fastapi import (
@@ -91,6 +91,68 @@ def _is_cacheable_allow_result(req: PrePostCheckRequest, result: dict) -> bool:
         and result.get("budget_status") is None
         and result.get("budget_info") is None
     )
+
+
+def _build_decision_event(
+    *,
+    direction: str,
+    req: PrePostCheckRequest,
+    result: dict,
+    org_id: Optional[str],
+    user_id: Optional[str],
+    api_key: str,
+    correlation_id: str,
+    start_ts: int,
+    latency_ms: int,
+    pii_types: List[str],
+    confidence: float,
+    channel: Optional[str],
+) -> dict:
+    """Build the decision.v1 event the dashboard persists as a Decision row.
+
+    The raw input never leaves precheck: the audit trail gets a hash of it,
+    plus the redacted output for transform decisions (so a reviewer can see
+    what was removed). Allow/deny/confirm outputs equal the raw input, so
+    they are not sent.
+    """
+    payload_out = None
+    if result.get("decision") == "transform" and settings.audit_include_redacted_output:
+        payload_out = {"raw_text_out": result.get("raw_text_out", "")}
+
+    return {
+        "type": "INGEST",
+        "channel": channel,
+        "schema": "decision.v1",
+        "idempotencyKey": f"{direction}-{start_ts}-{correlation_id}",
+        "data": {
+            "orgId": org_id,
+            "direction": direction,
+            "decision": result["decision"],
+            "tool": req.tool,
+            "scope": req.scope,
+            "policyId": result.get("policy_id"),
+            "payloadOut": payload_out,
+            "reasons": result.get("reasons") or [],
+            "detectorSummary": {
+                "reasons": result.get("reasons") or [],
+                "confidence": confidence,
+                "piiDetected": pii_types,
+            },
+            "payloadHash": f"sha256:{hashlib.sha256(req.raw_text.encode()).hexdigest()}",
+            "latencyMs": latency_ms,
+            "correlationId": correlation_id,
+            "tags": list(req.tags or []),
+            "ts": datetime.fromtimestamp(start_ts, tz=timezone.utc).isoformat(),
+            "authentication": {
+                "userId": user_id,
+                "apiKeyId": (
+                    hashlib.sha256(api_key.encode()).hexdigest()[:16]
+                    if api_key
+                    else None
+                ),
+            },
+        },
+    }
 
 
 def extract_pii_info_from_reasons(
@@ -442,50 +504,38 @@ async def precheck(
         decisions_channel = f"org:{org_id}:decisions" if org_id else None
         final_api_key = api_key or ""
 
-        # Build event (always send, even if orgId or channel are None)
-        event = {
-            "type": "INGEST",
-            "channel": decisions_channel,
-            "schema": "decision.v1",
-            "idempotencyKey": f"precheck-{start_ts}-{correlation_id}",
-            "data": {
-                "orgId": org_id,
-                "direction": "precheck",
-                "decision": result["decision"],
-                "tool": req.tool,
-                "scope": req.scope,
-                "rawText": req.raw_text,
-                "rawTextOut": result.get("raw_text_out", ""),
-                "reasons": result.get("reasons", []),
-                "detectorSummary": {
-                    "reasons": result.get("reasons", []),
-                    "confidence": confidence,
-                    "piiDetected": pii_types,
-                },
-                "payloadHash": f"sha256:{hashlib.sha256(req.raw_text.encode()).hexdigest()}",
-                "latencyMs": int((time.time() - start_time) * 1000),
-                "correlationId": correlation_id,
-                "tags": [],  # TODO: Extract from request or make configurable
-                "ts": f"{datetime.fromtimestamp(start_ts).isoformat()}Z",
-                "authentication": {
-                    "userId": user_id,
-                    "apiKeyId": (
-                        hashlib.sha256(final_api_key.encode()).hexdigest()[:16]
-                        if final_api_key
-                        else None
-                    ),
-                },
-            },
-        }
+        event = _build_decision_event(
+            direction="precheck",
+            req=req,
+            result=result,
+            org_id=org_id,
+            user_id=user_id,
+            api_key=final_api_key,
+            correlation_id=correlation_id,
+            start_ts=start_ts,
+            latency_ms=int((time.time() - start_time) * 1000),
+            pii_types=pii_types,
+            confidence=confidence,
+            channel=decisions_channel,
+        )
 
-        # Fire and forget (don't block response path)
+        # Fire and forget (don't block response path). The request's own key
+        # authenticates the gateway connection so the decision lands in the
+        # key's org.
         try:
             asyncio.create_task(
-                emit_event(event, org_id=org_id, correlation_id=correlation_id)
+                emit_event(
+                    event,
+                    org_id=org_id,
+                    correlation_id=correlation_id,
+                    auth_key=api_key,
+                )
             )
         except RuntimeError:
             # If no running loop (tests), do it inline once
-            await emit_event(event, org_id=org_id, correlation_id=correlation_id)
+            await emit_event(
+                event, org_id=org_id, correlation_id=correlation_id, auth_key=api_key
+            )
 
         # Audit log before response
         audit_log(
@@ -592,50 +642,38 @@ async def postcheck(
         decisions_channel = f"org:{org_id}:decisions" if org_id else None
         final_api_key = api_key or ""
 
-        # Build event (always send, even if orgId or channel are None)
-        event = {
-            "type": "INGEST",
-            "channel": decisions_channel,
-            "schema": "decision.v1",
-            "idempotencyKey": f"postcheck-{start_ts}-{correlation_id}",
-            "data": {
-                "orgId": org_id,
-                "direction": "postcheck",
-                "decision": result["decision"],
-                "tool": req.tool,
-                "scope": req.scope,
-                "rawText": req.raw_text,
-                "rawTextOut": result.get("raw_text_out", ""),
-                "reasons": result.get("reasons", []),
-                "detectorSummary": {
-                    "reasons": result.get("reasons", []),
-                    "confidence": confidence,
-                    "piiDetected": pii_types,
-                },
-                "payloadHash": f"sha256:{hashlib.sha256(req.raw_text.encode()).hexdigest()}",
-                "latencyMs": int((time.time() - start_time) * 1000),
-                "correlationId": correlation_id,
-                "tags": [],  # TODO: Extract from request or make configurable
-                "ts": f"{datetime.fromtimestamp(start_ts).isoformat()}Z",
-                "authentication": {
-                    "userId": user_id,
-                    "apiKeyId": (
-                        hashlib.sha256(final_api_key.encode()).hexdigest()[:16]
-                        if final_api_key
-                        else None
-                    ),
-                },
-            },
-        }
+        event = _build_decision_event(
+            direction="postcheck",
+            req=req,
+            result=result,
+            org_id=org_id,
+            user_id=user_id,
+            api_key=final_api_key,
+            correlation_id=correlation_id,
+            start_ts=start_ts,
+            latency_ms=int((time.time() - start_time) * 1000),
+            pii_types=pii_types,
+            confidence=confidence,
+            channel=decisions_channel,
+        )
 
-        # Fire and forget (don't block response path)
+        # Fire and forget (don't block response path). The request's own key
+        # authenticates the gateway connection so the decision lands in the
+        # key's org.
         try:
             asyncio.create_task(
-                emit_event(event, org_id=org_id, correlation_id=correlation_id)
+                emit_event(
+                    event,
+                    org_id=org_id,
+                    correlation_id=correlation_id,
+                    auth_key=api_key,
+                )
             )
         except RuntimeError:
             # If no running loop (tests), do it inline once
-            await emit_event(event, org_id=org_id, correlation_id=correlation_id)
+            await emit_event(
+                event, org_id=org_id, correlation_id=correlation_id, auth_key=api_key
+            )
 
         # Audit log before response
         audit_log(

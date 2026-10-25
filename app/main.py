@@ -26,6 +26,9 @@ def _configure_logging() -> None:
         )
     )
     logging.basicConfig(level=level, handlers=[handler], force=True)
+    # Presidio logs the analysed text at DEBUG; never let input reach logs.
+    logging.getLogger("presidio-analyzer").setLevel(logging.WARNING)
+    logging.getLogger("presidio-anonymizer").setLevel(logging.WARNING)
 
 
 @asynccontextmanager

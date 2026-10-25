@@ -364,88 +364,54 @@ GET /api/metrics
 ## Event Schema
 
 ### Policy Decision Event
-Every policy decision emits a webhook event with the following schema:
+Every precheck/postcheck decision is sent to the dashboard's websocket-service,
+which persists it as a `Decision` row (the audit log). Built by
+`app/api.py::_build_decision_event`:
 
 ```json
 {
   "type": "INGEST",
-  "channel": "org:YOUR_ORG:decisions",
+  "channel": "org:ORG_ID:decisions",
   "schema": "decision.v1",
-  "idempotencyKey": "precheck-1735229123456-abc123def",
+  "idempotencyKey": "precheck-1792921490-corr-abc123",
   "data": {
-    "orgId": "YOUR_ORG_ID",
+    "orgId": "ORG_ID",
     "direction": "precheck",
     "decision": "transform",
-    "tool": "verify_identity",
+    "tool": "model.chat",
     "scope": "net.external",
-    "rawText": "User email: alice@example.com, SSN: 123-45-6789",
-    "rawTextOut": "User email: alice@example.com, SSN: pii_8797942a",
-    "reasons": ["pii.allowed:PII:email_address","pii.tokenized:PII:us_ssn"],
-    "detectorSummary": {
-      "reasons": ["pii.allowed:PII:email_address","pii.tokenized:PII:us_ssn"],
-      "confidence": 0.85,
-      "piiDetected": ["email_address", "us_ssn"]
-    },
-    "payloadHash": "sha256:a1b2c3d4e5f6...",
+    "policyId": "net-redact-presidio",
+    "payloadOut": {"raw_text_out": "email me at <USER_EMAIL>"},
+    "reasons": ["pii.redacted:email_address"],
+    "detectorSummary": {"reasons": ["..."], "confidence": 0.7, "piiDetected": ["email_address"]},
+    "payloadHash": "sha256:a1b2c3...",
     "latencyMs": 45,
-    "correlationId": "req-123",
-    "tags": ["production", "api-call"],
-    "ts": "2024-12-26T10:15:30.123Z",
-    "authentication": {
-      "userId": "u1",
-      "apiKey": "GAI_LOCAL_DEV_ABC"
-    }
+    "correlationId": "corr-abc123",
+    "tags": ["demo", "chat"],
+    "ts": "2026-10-25T09:44:50+00:00",
+    "authentication": {"userId": "u1", "apiKeyId": "<sha256(key)[:16]>"}
   }
 }
 ```
 
-### Event Fields
+- **The raw input never leaves precheck**: only `payloadHash` is sent.
+  `payloadOut` holds the redacted output of `transform` decisions only, and can
+  be turned off with `AUDIT_INCLUDE_REDACTED_OUTPUT=false`.
+- `tags` are the request's `tags`. `ts` is UTC.
 
-#### Top-Level Fields
-- **`type`**: Event type, always `"INGEST"` for decision events
-- **`channel`**: WebSocket channel format `"org:{ORG_ID}:decisions"`
-- **`schema`**: Schema version, currently `"decision.v1"`
-- **`idempotencyKey`**: Unique key for deduplication (format: `{direction}-{timestamp}-{correlation_id}`)
-
-#### Data Fields
-- **`orgId`**: Organization identifier (configurable via `ORG_ID` environment variable)
-- **`direction`**: `"precheck"` for ingress, `"postcheck"` for egress
-- **`decision`**: Policy decision (`allow`, `deny`, `transform`, `confirm`)
-- **`tool`**: Tool name from the request
-- **`scope`**: Network scope from the request
-- **`rawText`**: Original raw text input from the request
-- **`rawTextOut`**: Processed text output with redundant values replaced
-- **`reasons`**: Array of reason codes explaining the decision
-- **`detectorSummary`**: PII detection results and confidence
-  - **`reasons`**: Array of reason codes explaining the decision
-  - **`confidence`**: Calculated confidence score (0.0-1.0) based on PII detection actions
-  - **`piiDetected`**: Array of detected PII types (e.g., `["email_address", "us_ssn"]`)
-- **`payloadHash`**: SHA256 hash of the request payload for integrity verification
-- **`latencyMs`**: Processing time in milliseconds
-- **`correlationId`**: Correlation ID for request tracking
-- **`tags`**: Array of strings for categorization (currently empty, configurable)
-- **`ts`**: ISO 8601 timestamp of the decision
-- **`authentication`**: Authentication information from the request
-  - **`userId`**: User ID extracted from the URL path parameter
-  - **`apiKey`**: API key from the request header
-
-### WebSocket Webhook Integration
-
-The service uses WebSocket connections to send webhook events instead of HTTP POST requests:
-
-**URL Format**: `ws://host:port/api/ws/gateway?key=API_KEY&org=ORG_ID&channels=CHANNEL_LIST`
-
-**Example**:
-```
-ws://172.16.10.59:3002/api/ws/gateway?key=gai_827eode3nxa&org=dfy&channels=org:cmfzriajm0003fyp86ocrgjoj:decisions,org:cmfzriajm0003fyp86ocrgjoj:postcheck,org:cmfzriajm0003fyp86ocrgjoj:dlq,org:cmfzriajm0003fyp86ocrgjoj:precheck,org:cmfzriajm0003fyp86ocrgjoj:approvals,user:cmfzriaip0000fyp81gjfkri9:notifications
-```
-
-**Parsed Values**:
-- **`orgId`**: Extracted from `org` parameter (`dfy`)
-- **`channel`**: Extracted from `channels` parameter, finds the `:decisions` channel (`org:cmfzriajm0003fyp86ocrgjoj:decisions`)
-- **`apiKey`**: Extracted from `key` parameter (`gai_827eode3nxa`)
-
-**Dynamic Configuration**: All values are dynamically extracted from the webhook URL. If parsing fails or values (`orgId` or `channel`) are not found in the URL, they will be `null` in the webhook event, but the event will still be emitted. The service will always process the request and emit webhook events regardless of URL parsing success.
+### Delivery (`app/events.py`)
+- `WEBHOOK_BASE_URL` (e.g. `ws://localhost:3001/ws`) is required. Without it
+  every event goes to the DLQ (`PRECHECK_DLQ`) and the audit log stays empty.
+- Per event the emitter connects, skips the gateway's `READY` greeting, sends
+  `AUTH` with the **request's own API key** (`WEBHOOK_CONN_KEY` is only a
+  fallback), waits for `AUTH_SUCCESS`, sends `INGEST`, and waits for `ACK`. An
+  `ERROR` frame or a timeout counts as a failed attempt. After
+  `WEBHOOK_MAX_RETRIES` attempts the event is written to the DLQ.
+- The gateway files a decision under the org of the key that authenticated the
+  connection, so one org's key cannot write into another org's audit log.
+- A failed TLS handshake is **not** retried over plaintext (that fallback was removed).
+- Supports websockets ≥12. The header keyword is picked per major version
+  (`additional_headers` from 14 on).
 
 ## Policy Configuration
 
@@ -1174,6 +1140,15 @@ curl -X POST http://localhost:8080/api/v1/postcheck \
 ```
 
 ## Recent Changes Log
+- **2026-10-25**: **v2 decision pipe.** Precheck decisions now actually reach the
+  audit log. The emitter used to read the gateway's `READY` greeting as its AUTH
+  reply, and it passed `extra_headers`, which websockets ≥14 rejects, so every
+  event went to the DLQ. It now authenticates with the request's key and waits
+  for `ACK`. The event drops `rawText`, adds `policyId` and `payloadOut`, and
+  uses real UTC timestamps. The plaintext fallback after a TLS failure is gone.
+  The Presidio loggers are pinned to WARNING so `DEBUG=true` can't log prompt
+  text. `env.example` now points at the shared Postgres and the local gateway.
+  Tests: `tests/test_decision_event_pipe.py`.
 - **2026-10-25**: **v2 policy semantics.** The org's dashboard policy now beats a
   request's `policy_config` (it used to be the other way round, letting any key
   holder bypass governance). One action vocabulary is shared with the policy UI:
