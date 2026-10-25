@@ -130,10 +130,13 @@ def _build_decision_event(
             "decision": result["decision"],
             "tool": req.tool,
             "scope": req.scope,
-            "policyId": result.get("policy_id"),
+            # The org's dashboard Policy when one decided, else the rule
+            # level (deny-exec, defaults, ...) that produced the decision.
+            "policyId": result.get("_policy_ref") or result.get("policy_id"),
             "payloadOut": payload_out,
             "reasons": result.get("reasons") or [],
             "detectorSummary": {
+                "rule": result.get("policy_id"),
                 "reasons": result.get("reasons") or [],
                 "confidence": confidence,
                 "piiDetected": pii_types,

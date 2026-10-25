@@ -394,6 +394,9 @@ which persists it as a `Decision` row (the audit log). Built by
 }
 ```
 
+- `policyId` is the org's dashboard `Policy.id` when that policy decided, else
+  the rule level (`deny-exec`, `defaults`, …). The rule level is always in
+  `detectorSummary.rule`.
 - **The raw input never leaves precheck**: only `payloadHash` is sent.
   `payloadOut` holds the redacted output of `transform` decisions only, and can
   be turned off with `AUDIT_INCLUDE_REDACTED_OUTPUT=false`.

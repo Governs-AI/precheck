@@ -264,3 +264,19 @@ def test_allow_cache_key_ignores_payload_when_org_policy_exists(org_policy):
     assert api._build_allow_cache_key(plain, ORG) == api._build_allow_cache_key(
         with_payload, ORG
     )
+
+
+def test_result_names_the_dashboard_policy_that_decided(org_policy):
+    org_policy(id="pol-xyz")
+    assert _eval()["_policy_ref"] == "pol-xyz"
+
+
+def test_payload_policy_has_no_dashboard_ref():
+    result = evaluate_with_payload_policy(
+        tool="model.chat",
+        scope="net.external",
+        raw_text=CLEAN_TEXT,
+        now=1000,
+        policy_config={"defaults": {"ingress": {"action": "allow"}}},
+    )
+    assert "_policy_ref" not in result

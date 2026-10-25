@@ -1328,7 +1328,7 @@ def evaluate_with_payload_policy(
     resolved_policy_config["tool"] = tool
     resolved_policy_config["scope"] = scope or ""
 
-    return _evaluate_dynamic_policy(
+    result = _evaluate_dynamic_policy(
         tool,
         scope,
         raw_text,
@@ -1339,6 +1339,12 @@ def evaluate_with_payload_policy(
         user_id,
         budget_context,
     )
+    # Which dashboard policy decided (None for payload/YAML policies). Not
+    # part of the HTTP response; the audit event uses it to link the
+    # Decision row to the org's Policy.
+    if resolved_policy_config.get("_policy_id"):
+        result["_policy_ref"] = resolved_policy_config["_policy_id"]
+    return result
 
 
 def _evaluate_dynamic_policy(
