@@ -1,5 +1,6 @@
 import hashlib
 import importlib.util
+import logging
 import os
 import re
 import time
@@ -23,6 +24,8 @@ from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 
 from .settings import settings
+
+logger = logging.getLogger(__name__)
 
 # Fallback regex patterns for when Presidio is not available
 EMAIL = re.compile(r"\b([A-Za-z0-9._%+-])[^@\s]*(@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\b")
@@ -147,6 +150,13 @@ PHONE_REGIONS_BY_LANGUAGE = {
 # rather than taking the whole service down.
 SUPPORTED_LANGUAGES: List[str] = ["en"]
 
+# Configured languages that could not be loaded, mapped to the reason.
+# Reported at startup by detection_warnings().
+SKIPPED_LANGUAGES: Dict[str, str] = {}
+
+# Hinted languages already reported as not loaded, so each is logged once.
+_unloaded_hints_reported: Set[str] = set()
+
 
 def _model_available(model_name: str) -> bool:
     return importlib.util.find_spec(model_name) is not None
@@ -156,19 +166,17 @@ def _resolve_language_models() -> List[Dict[str, str]]:
     """Build the {lang_code, model_name} list for the configured languages."""
     configured = settings.presidio_language_list()
     models: List[Dict[str, str]] = []
+    SKIPPED_LANGUAGES.clear()
     for lang in configured:
         if lang == "en":
             model_name = getattr(settings, "presidio_model", "en_core_web_sm")
         else:
             model_name = DEFAULT_SPACY_MODELS.get(lang)
         if not model_name:
-            print(f"Presidio: no spaCy model mapped for language {lang!r}; skipping")
+            SKIPPED_LANGUAGES[lang] = "no spaCy model is mapped for it"
             continue
         if not _model_available(model_name):
-            print(
-                f"Presidio: spaCy model {model_name!r} for language {lang!r} is not "
-                "installed; skipping that language"
-            )
+            SKIPPED_LANGUAGES[lang] = f"spaCy model {model_name} is not installed"
             continue
         models.append({"lang_code": lang, "model_name": model_name})
 
@@ -723,6 +731,47 @@ def init_presidio():
 # Initialize on import
 init_presidio()
 
+
+def detection_warnings() -> List[str]:
+    """Explain how PII detection is running below full coverage, if it is.
+
+    Logged once at startup so a reduced setup is never silent:
+      - Presidio unavailable: regex patterns only.
+      - A configured language whose model is missing: that language's text
+        is analysed by another language's model.
+      - English-only by default: the PRESIDIO_LANGUAGES default was not
+        changed, so non-English text is analysed with the English model,
+        which misses more PII and over-redacts clean text. Setting
+        PRESIDIO_LANGUAGES explicitly (even to "en") records the choice and
+        silences this one.
+    """
+    if not USE_PRESIDIO or ANALYZER is None:
+        return [
+            "PII detection is running on regex patterns only (Presidio is "
+            "disabled or failed to load); names, addresses and free-text PII "
+            "are not detected."
+        ]
+
+    warnings = [
+        f"PII detection for language {lang} is disabled: {reason}. Text in "
+        f"that language is analysed with the {SUPPORTED_LANGUAGES[0]} model."
+        for lang, reason in SKIPPED_LANGUAGES.items()
+    ]
+    if (
+        SUPPORTED_LANGUAGES == ["en"]
+        and not SKIPPED_LANGUAGES
+        and "presidio_languages" not in settings.model_fields_set
+    ):
+        warnings.append(
+            "PII detection is English-only (PRESIDIO_LANGUAGES defaults to en). "
+            "Non-English text is analysed with the English model, which misses "
+            "more PII and redacts clean text. Set PRESIDIO_LANGUAGES=en,es,fr,de,zh "
+            "to use every model in the image (about 1 GB of memory), or set "
+            "PRESIDIO_LANGUAGES=en to accept English-only detection."
+        )
+    return warnings
+
+
 ANONYMIZE_OPERATORS = {
     "DEFAULT": OperatorConfig(
         "mask", {"masking_char": "*", "chars_to_mask": 4, "from_end": True}
@@ -828,6 +877,20 @@ def _languages_to_analyze(language: Optional[str]) -> List[str]:
         code = language.strip().lower()
         if code in supported:
             return [code]
+        # Only known codes are reported: the hint is caller-supplied text.
+        if code in DEFAULT_SPACY_MODELS and code not in _unloaded_hints_reported:
+            _unloaded_hints_reported.add(code)
+            logger.warning(
+                "PII detection: requests hint language %s, which is not loaded "
+                "(PRESIDIO_LANGUAGES=%s); analysing them in %s",
+                code,
+                ",".join(supported),
+                (
+                    "all loaded languages"
+                    if getattr(settings, "presidio_language_mode", "hint") == "union"
+                    else supported[0]
+                ),
+            )
 
     mode = getattr(settings, "presidio_language_mode", "hint")
     if mode == "union":
