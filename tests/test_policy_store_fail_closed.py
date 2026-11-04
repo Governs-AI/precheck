@@ -6,8 +6,9 @@ A store error used to look exactly like "this org has no policy", so the
 evaluator fell back to the caller's `policy_config` — a caller could send
 `pass_through` and have card numbers go out unredacted during an outage.
 These tests pin the store raising PolicyStoreUnavailable, failures not being
-cached, the last known org policy being served when one is cached, and the
-evaluator using a server-side redacting (or denying) policy otherwise.
+cached, the last known org policy being served when one is cached, the
+evaluator using a server-side redacting (or denying) policy otherwise, and
+fail-closed allows being cached only under the outage revision.
 """
 
 from datetime import datetime
@@ -269,21 +270,60 @@ def test_precheck_redacts_card_when_store_is_down(
     assert STORE_UNAVAILABLE_REASON in body["reasons"]
 
 
-def test_fail_closed_allows_are_not_cached(
-    test_client, org_api_key, store, _quiet_runtime
-):
-    store["up"] = False
-    payload = {
-        "tool": "model.chat",
-        "scope": "net.external",
-        "raw_text": "Summarise the release notes.",
-        "policy_config": PERMISSIVE,
-    }
-    headers = {"X-Governs-Key": org_api_key}
+_CLEAN_PAYLOAD = {
+    "tool": "model.chat",
+    "scope": "net.external",
+    "raw_text": "Summarise the release notes.",
+    "policy_config": PERMISSIVE,
+}
 
-    first = test_client.post("/api/v1/precheck", json=payload, headers=headers)
-    second = test_client.post("/api/v1/precheck", json=payload, headers=headers)
+
+def test_fail_closed_allows_are_cached_only_for_the_outage(
+    test_client, org_api_key, store, db_session, _quiet_runtime
+):
+    headers = {"X-Governs-Key": org_api_key}
+    store["up"] = False
+
+    first = test_client.post("/api/v1/precheck", json=_CLEAN_PAYLOAD, headers=headers)
+    second = test_client.post("/api/v1/precheck", json=_CLEAN_PAYLOAD, headers=headers)
 
     assert first.json()["decision"] == "allow"
     assert first.headers["x-cache"] == "MISS"
+    assert second.headers["x-cache"] == "HIT"
+    assert STORE_UNAVAILABLE_REASON in second.json()["reasons"]
+
+    # Once the store answers, the org's own policy decides; the outage
+    # decision is not served.
+    _add_policy(db_session)
+    store["up"] = True
+    after = test_client.post("/api/v1/precheck", json=_CLEAN_PAYLOAD, headers=headers)
+
+    assert after.headers["x-cache"] == "MISS"
+    assert after.json()["decision"] == "deny"
+    assert STORE_UNAVAILABLE_REASON not in (after.json().get("reasons") or [])
+
+
+def test_allow_is_not_cached_when_store_state_changes_mid_request(
+    test_client, org_api_key, store, monkeypatch, _quiet_runtime
+):
+    """Keyed while the store was up, evaluated after it went down."""
+    from app import api
+
+    real_revision = api._policy_revision
+
+    def revision_then_outage(req, org_id):
+        revision = real_revision(req, org_id)
+        policy_source.invalidate(org_id)  # the cached entry expires...
+        store["up"] = False  # ...and the store goes down before evaluation
+        return revision
+
+    monkeypatch.setattr(api, "_policy_revision", revision_then_outage)
+    headers = {"X-Governs-Key": org_api_key}
+    first = test_client.post("/api/v1/precheck", json=_CLEAN_PAYLOAD, headers=headers)
+
+    monkeypatch.setattr(api, "_policy_revision", real_revision)
+    store["up"] = True
+    second = test_client.post("/api/v1/precheck", json=_CLEAN_PAYLOAD, headers=headers)
+
+    assert STORE_UNAVAILABLE_REASON in first.json()["reasons"]
     assert second.headers["x-cache"] == "MISS"
