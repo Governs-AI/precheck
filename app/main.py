@@ -36,6 +36,14 @@ async def lifespan(app: FastAPI):
     """Application lifespan events"""
     # Startup
     create_tables()
+    from .policies import SUPPORTED_LANGUAGES, USE_PRESIDIO, detection_warnings
+
+    logger.info(
+        "PII detection languages: %s",
+        ",".join(SUPPORTED_LANGUAGES) if USE_PRESIDIO else "none (regex only)",
+    )
+    for warning in detection_warnings():
+        logger.warning(warning)
     yield
     # Shutdown
     pass

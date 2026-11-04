@@ -33,7 +33,11 @@ from .metrics import (
     set_service_info,
 )
 from .models import DecisionResponse, PrePostCheckRequest
-from .policies import evaluate, evaluate_with_payload_policy
+from .policies import (
+    STORE_UNAVAILABLE_REASON,
+    evaluate,
+    evaluate_with_payload_policy,
+)
 from .settings import settings
 from .storage import APIKey, get_db
 
@@ -47,12 +51,18 @@ def _ensure_correlation_id(corr_id: Optional[str]) -> str:
     return corr_id or f"corr-{secrets.token_hex(12)}"
 
 
+_STORE_UNAVAILABLE_REVISION = "store-unavailable"
+
+
 def _policy_revision(req: PrePostCheckRequest, org_id: Optional[str]) -> str:
     """Identify the policy that will evaluate `req`, for cache keying.
 
     The org's dashboard policy wins over a payload policy (ADR-005), so its
     revision (id + updatedAt) is what must invalidate cached allows. The
-    lookup is served from policy_source's in-process cache.
+    lookup is served from policy_source's in-process cache. When the store
+    is unreachable the evaluator ignores the payload policy and applies the
+    fail-closed policy for POLICY_STORE_FAIL_MODE, so that is what the key
+    names.
     """
     if org_id:
         from .policy_source import get_active_policy
@@ -60,7 +70,7 @@ def _policy_revision(req: PrePostCheckRequest, org_id: Optional[str]) -> str:
         try:
             org_policy = get_active_policy(org_id)
         except Exception:
-            org_policy = None
+            return f"{_STORE_UNAVAILABLE_REVISION}:{settings.policy_store_fail_mode}"
         if org_policy:
             return f"org:{org_policy.get('_revision') or org_policy.get('_policy_id')}"
     if req.policy_config:
@@ -71,8 +81,13 @@ def _policy_revision(req: PrePostCheckRequest, org_id: Optional[str]) -> str:
     return "legacy"
 
 
-def _build_allow_cache_key(req: PrePostCheckRequest, org_id: Optional[str]) -> str:
-    policy_version = _policy_revision(req, org_id)
+def _build_allow_cache_key(
+    req: PrePostCheckRequest,
+    org_id: Optional[str],
+    policy_version: Optional[str] = None,
+) -> str:
+    if policy_version is None:
+        policy_version = _policy_revision(req, org_id)
     payload = {
         "content": req.raw_text,
         "tool": req.tool,
@@ -84,9 +99,18 @@ def _build_allow_cache_key(req: PrePostCheckRequest, org_id: Optional[str]) -> s
     return f"precheck:allow:{org_id or 'no-org'}:{digest}"
 
 
-def _is_cacheable_allow_result(req: PrePostCheckRequest, result: dict) -> bool:
+def _is_cacheable_allow_result(
+    req: PrePostCheckRequest, result: dict, policy_version: str
+) -> bool:
+    # A fail-closed allow is cached under the store-unavailable revision, so
+    # it is never served once the store answers again. If the store changed
+    # state between keying and evaluating, the key names the wrong policy
+    # and the result is not cached.
+    keyed_as_outage = policy_version.startswith(_STORE_UNAVAILABLE_REVISION)
+    evaluated_in_outage = STORE_UNAVAILABLE_REASON in (result.get("reasons") or [])
     return (
         req.budget_context is None
+        and keyed_as_outage == evaluated_in_outage
         and result.get("decision") == "allow"
         and result.get("budget_status") is None
         and result.get("budget_info") is None
@@ -452,7 +476,8 @@ async def precheck(
 
     start_time = time.time()
     start_ts = int(start_time)
-    cache_key = _build_allow_cache_key(req, org_id)
+    policy_version = _policy_revision(req, org_id)
+    cache_key = _build_allow_cache_key(req, org_id, policy_version)
 
     try:
         logger.debug(
@@ -501,7 +526,7 @@ async def precheck(
                     budget_context,
                 )
 
-            if _is_cacheable_allow_result(req, result):
+            if _is_cacheable_allow_result(req, result, policy_version):
                 allow_decision_cache.set(cache_key, result)
 
             # Metrics: Record policy evaluation

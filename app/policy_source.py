@@ -3,7 +3,7 @@
 See ADR-005 (knowledge/ADR/005-policy-source-of-truth.md) for the design.
 
 Public surface:
-    get_active_policy(org_id: str) -> dict | None
+    get_active_policy(org_id: str) -> dict | None   # raises PolicyStoreUnavailable
     invalidate(org_id: str) -> None
     cache_stats() -> dict   # for diagnostics / metrics
 
@@ -45,7 +45,15 @@ class _CacheEntry:
 
 _cache: dict[str, _CacheEntry] = {}
 _cache_lock = threading.RLock()
-_metrics = {"hit": 0, "miss": 0, "invalidate": 0}
+_metrics = {"hit": 0, "miss": 0, "invalidate": 0, "unavailable": 0, "stale": 0}
+
+
+class PolicyStoreUnavailable(Exception):
+    """The policy store could not be read, so the org's policy is unknown.
+
+    Distinct from "the org has no active policy" (None): callers must not
+    treat an outage as permission to use a caller-supplied policy.
+    """
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -140,7 +148,14 @@ def _map_row_to_policy_config(row: DashboardPolicy) -> dict:
 # DB read
 # ──────────────────────────────────────────────────────────────────────
 def _fetch_from_db(org_id: str) -> Optional[dict]:
-    db: Session = SessionLocal()
+    """Return the org's mapped policy, None if it has none.
+
+    Raises PolicyStoreUnavailable when the store cannot be queried.
+    """
+    try:
+        db: Session = SessionLocal()
+    except Exception as exc:
+        raise PolicyStoreUnavailable(str(exc)) from exc
     try:
         row = (
             db.query(DashboardPolicy)
@@ -157,10 +172,7 @@ def _fetch_from_db(org_id: str) -> Optional[dict]:
             return None
         return _map_row_to_policy_config(row)
     except Exception as exc:
-        # Don't blow up the request path on a DB hiccup — let the caller fall
-        # back to the YAML policy. Logged loudly so it's visible in audits.
-        logger.warning("policy_source: db fetch failed for org=%s err=%s", org_id, exc)
-        return None
+        raise PolicyStoreUnavailable(str(exc)) from exc
     finally:
         db.close()
 
@@ -174,6 +186,10 @@ def get_active_policy(org_id: Optional[str]) -> Optional[dict]:
     None means "no row in DB" — the caller should fall back to the YAML
     default policy (preserving today's behavior for orgs without a
     dashboard-managed policy).
+
+    If the store is unreachable, the org's last fetched policy is served
+    even past its TTL. With no policy on hand, PolicyStoreUnavailable is
+    raised; failures are never cached, so recovery is picked up at once.
     """
     if not org_id:
         return None
@@ -188,7 +204,23 @@ def get_active_policy(org_id: Optional[str]) -> Optional[dict]:
             return entry.policy
 
     # Cache miss — fetch outside the lock to avoid holding it across IO.
-    fetched = _fetch_from_db(org_id)
+    try:
+        fetched = _fetch_from_db(org_id)
+    except PolicyStoreUnavailable as exc:
+        with _cache_lock:
+            _metrics["unavailable"] += 1
+            stale = _cache.get(org_id)
+            if stale is not None and stale.policy is not None:
+                _metrics["stale"] += 1
+                logger.warning(
+                    "policy_source: store unavailable for org=%s, serving last "
+                    "known policy err=%s",
+                    org_id,
+                    exc,
+                )
+                return stale.policy
+        logger.error("policy_source: store unavailable for org=%s err=%s", org_id, exc)
+        raise
 
     with _cache_lock:
         _cache[org_id] = _CacheEntry(policy=fetched, fetched_at=time.monotonic())
