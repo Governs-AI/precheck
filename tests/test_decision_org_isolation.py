@@ -53,7 +53,7 @@ async def test_precheck_emits_org_id_from_key(db_session):
     raw_key = _insert_org_key(db_session, org_id="org-acme-001")
     captured: List[Tuple] = []
 
-    async def mock_emit(event, org_id=None, correlation_id=None):
+    async def mock_emit(event, org_id=None, correlation_id=None, auth_key=None):
         captured.append((event, org_id))
 
     app = _make_app(db_session)
@@ -81,7 +81,7 @@ async def test_precheck_event_data_org_id_and_channel(db_session):
     raw_key = _insert_org_key(db_session, org_id="org-beta-002")
     captured: List[dict] = []
 
-    async def mock_emit(event, org_id=None, correlation_id=None):
+    async def mock_emit(event, org_id=None, correlation_id=None, auth_key=None):
         captured.append(event)
 
     app = _make_app(db_session)
@@ -111,7 +111,7 @@ async def test_two_org_keys_emit_to_distinct_orgs(db_session):
     key_b = _insert_org_key(db_session, org_id="org-b")
     captured: List[Tuple] = []
 
-    async def mock_emit(event, org_id=None, correlation_id=None):
+    async def mock_emit(event, org_id=None, correlation_id=None, auth_key=None):
         captured.append((event["data"]["orgId"], org_id))
 
     app = _make_app(db_session)
@@ -179,7 +179,7 @@ async def test_postcheck_emits_org_id_from_key(db_session):
     raw_key = _insert_org_key(db_session, org_id="org-gamma-003")
     captured: List[Tuple] = []
 
-    async def mock_emit(event, org_id=None, correlation_id=None):
+    async def mock_emit(event, org_id=None, correlation_id=None, auth_key=None):
         captured.append((event, org_id))
 
     app = _make_app(db_session)

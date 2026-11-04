@@ -11,7 +11,7 @@ spacy>=3.7.0
 phonenumbers>=8.13.0
 
 # Database and Storage
-sqlalchemy>=2.0.0
+sqlalchemy>=2.0.0,<2.1  # 2.1 defaults postgresql:// to psycopg 3; the image ships psycopg2
 psycopg2-binary>=2.9.0
 
 # Caching and Rate Limiting

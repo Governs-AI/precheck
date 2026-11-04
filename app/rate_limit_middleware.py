@@ -22,10 +22,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy.exc import SQLAlchemyError
 
+from .key_lookup import find_key
 from .key_utils import hash_api_key
 from .rate_limit import RateLimitResult, rate_limiter, specs_for_request
 from .settings import settings
-from .storage import APIKey, SessionLocal
+from .storage import SessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -65,13 +66,9 @@ def _tokens_estimate(request: Request) -> int:
 def _lookup_org_id(raw_key: str) -> Optional[str]:
     """Look up the ``org_id`` for ``raw_key``. Returns None if the key is
     unknown — authentication will reject the request downstream."""
-    try:
-        key_hash = hash_api_key(raw_key)
-    except Exception:  # pragma: no cover - defensive
-        return None
     session = SessionLocal()
     try:
-        record = session.query(APIKey).filter(APIKey.key_hash == key_hash).first()
+        record = find_key(session, raw_key)
         if record is None:
             return None
         org_id = record.org_id

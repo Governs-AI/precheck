@@ -23,6 +23,7 @@ from typing import Any, Dict, Optional
 
 from sqlalchemy.orm import Session
 
+from .policies import DEFAULT_DENY_TOOLS, is_listed_tool, normalize_action
 from .storage import DashboardPolicy, SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -50,56 +51,88 @@ _metrics = {"hit": 0, "miss": 0, "invalidate": 0}
 # ──────────────────────────────────────────────────────────────────────
 # Shape translation: dashboard Policy row → precheck PolicyConfig dict
 # ──────────────────────────────────────────────────────────────────────
-# The dashboard stores `defaults` as a free-form JSON. The convention we
-# enforce in v1 is `{"pii": "<action>"}` where action ∈
-# {"redact", "block", "tokenize", "allow"}. The evaluator wants the precheck
-# shape `defaults[direction]["action"]` with action ∈
-# {"deny", "redact", "tokenize", "pass_through"}.
-_PII_ACTION_MAP = {
-    "redact": "redact",
-    "block": "deny",
-    "deny": "deny",
-    "tokenize": "tokenize",
-    "pass": "pass_through",
-    "pass_through": "pass_through",
-    "allow": "pass_through",
-}
+def _direction_action(raw_defaults: Any, direction: str, fallback: str) -> str:
+    """Read `defaults[direction].action` (the policy UI's shape), else fallback."""
+    entry = raw_defaults.get(direction)
+    if isinstance(entry, dict) and entry.get("action"):
+        return normalize_action(entry.get("action"), fallback) or fallback
+    return fallback
+
+
+def _normalize_tool_access(tool_access: Any) -> dict:
+    """Fold each rule's action and allow_pii values to evaluator vocabulary."""
+    if not isinstance(tool_access, dict):
+        return {}
+    out = {}
+    for name, rule in tool_access.items():
+        if not isinstance(rule, dict):
+            continue
+        rule = dict(rule)
+        if rule.get("action") is not None:
+            rule["action"] = normalize_action(rule.get("action"), "redact")
+        rule["direction"] = rule.get("direction") or "both"
+        allow_pii = rule.get("allow_pii") or {}
+        rule["allow_pii"] = {
+            k: normalize_action(v, "redact")
+            for k, v in allow_pii.items()
+            if isinstance(k, str)
+        }
+        out[name] = rule
+    return out
 
 
 def _map_row_to_policy_config(row: DashboardPolicy) -> dict:
     """Translate a DashboardPolicy row into a precheck PolicyConfig dict.
 
     The output shape is consumed verbatim by `evaluate_with_payload_policy`
-    (precheck/app/policies.py). Unknown keys in `row.defaults` are preserved
-    verbatim so future extensions don't need to touch this function.
+    (precheck/app/policies.py). Two `defaults` shapes are accepted:
+    `{"pii": "<action>"}` (v1 API convention) and
+    `{"ingress": {"action": ...}, "egress": {"action": ...}}` (policy UI).
+    Actions may use either vocabulary (allow/block or pass_through/deny).
     """
     # Annotated Any rather than Dict[str, Any]: `row.defaults` is a SQLAlchemy
     # Column[Any] at type-check time, so a concrete dict annotation conflicts
     # with the assignment even though the runtime value is a dict.
     raw_defaults: Any = row.defaults or {}
 
-    # Translate the v1 convention; default to "redact" if the field is absent.
-    pii_action_in = str(raw_defaults.get("pii", "redact")).lower()
-    pii_action = _PII_ACTION_MAP.get(pii_action_in, "redact")
+    # The v1 convention sets both directions; default to "redact".
+    pii_action = (
+        normalize_action(raw_defaults.get("pii", "redact"), "redact") or "redact"
+    )
+
+    allow_tools: Any = list(row.allow_tools or [])
+    # Code-execution tools stay denied unless the org explicitly allows one.
+    deny_tools = [
+        t for t in DEFAULT_DENY_TOOLS if not is_listed_tool(t, allow_tools)
+    ] + [t for t in list(row.deny_tools or []) if t not in DEFAULT_DENY_TOOLS]
 
     return {
         "version": row.version or "v1",
         "defaults": {
-            "ingress": {"action": pii_action},
-            "egress": {"action": pii_action},
-            # Forward any non-pii defaults verbatim for forward-compat.
-            **{k: v for k, v in raw_defaults.items() if k != "pii"},
+            # Forward any other defaults verbatim for forward-compat.
+            **{
+                k: v
+                for k, v in raw_defaults.items()
+                if k not in ("pii", "ingress", "egress")
+            },
+            "ingress": {
+                "action": _direction_action(raw_defaults, "ingress", pii_action)
+            },
+            "egress": {"action": _direction_action(raw_defaults, "egress", pii_action)},
         },
-        "tool_access": row.tool_access or {},
-        "deny_tools": row.deny_tools or [],
-        "allow_tools": row.allow_tools or [],
-        "network_scopes": row.network_scopes or [],
-        "network_tools": row.network_tools or [],
+        "tool_access": _normalize_tool_access(row.tool_access),
+        "deny_tools": deny_tools,
+        "allow_tools": allow_tools,
+        "network_scopes": row.network_scopes or ["net."],
+        "network_tools": row.network_tools or ["web.", "http.", "fetch.", "request."],
         "on_error": row.on_error or "block",
-        # Provenance — useful in logs and audit, ignored by the evaluator.
+        # Provenance — useful in logs, audit and cache keys; ignored by the evaluator.
         "_policy_id": row.id,
         "_policy_name": row.name,
         "_priority": row.priority,
+        "_revision": (
+            f"{row.id}:{row.updated_at.isoformat()}" if row.updated_at else row.id
+        ),
     }
 
 

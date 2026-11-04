@@ -2,7 +2,11 @@
 # Copyright (c) 2024 GovernsAI. All rights reserved.
 """The held-out benchmark pools must be disjoint from the published ones and
 carry valid checksums, so a ``--pools heldout`` run measures unseen values
-rather than a reshuffle of the same ones."""
+rather than a reshuffle of the same ones.
+
+The pools cover the base corpus. The context regression cases also draw
+CITY and NAME_PLACE values from fixed lists outside the pools, so these
+tests build with ``regression=False``."""
 
 import pytest
 
@@ -50,15 +54,15 @@ def test_heldout_pools_cover_every_field():
 
 
 def test_heldout_slot_values_are_unseen():
-    published = _slot_values(corpus.build(pools="published"))
-    heldout = _slot_values(corpus.build(pools="heldout"))
+    published = _slot_values(corpus.build(pools="published", regression=False))
+    heldout = _slot_values(corpus.build(pools="heldout", regression=False))
     inline = {v for truths in corpus.INLINE_TRUTH.values() for v, _ in truths}
     assert (published & heldout) - inline == set()
 
 
 def test_heldout_corpus_has_same_shape():
-    published = corpus.build(pools="published")
-    heldout = corpus.build(pools="heldout")
+    published = corpus.build(pools="published", regression=False)
+    heldout = corpus.build(pools="heldout", regression=False)
     assert len(heldout) == len(published) == 438
     assert (
         sum(len(i.spans) for i in heldout)
