@@ -1,7 +1,7 @@
 # PII detection benchmark
 
 Measures what precheck's redaction path actually catches, as opposed to what
-the detector it wraps scores in isolation. Published detector benchmarks
+the detector it wraps scores in isolation. Standard detector benchmarks
 evaluate Presidio as a standalone model on text records; this one runs the
 pipeline as deployed — entity allowlist, language configuration, false-positive
 filter and all — because that is what decides whether a customer's SSN leaves
@@ -155,31 +155,44 @@ that leaked before this change too.
 
 ## Held-out pools
 
-The published corpus draws every slot from small fixed pools (five names and
+The default pools fill every slot from small fixed lists (five names and
 three addresses per language, three cards, and so on): 630 spans over 110
 distinct values. Reseeding reshuffles those same values, so it is not a
 held-out set. `--pools heldout` swaps every pool for values absent from the
-published corpus (Luhn-valid cards, mod-97 IBANs, NPI/DEA check digits, fresh
+default pools (Luhn-valid cards, mod-97 IBANs, NPI/DEA check digits, fresh
 names and addresses per language). Templates and the inline partial/obfuscated
 tiers are unchanged. `tests/test_bench_corpus_pools.py` asserts the two pool
 sets are disjoint and the checksums valid.
 
-Five languages, `--pools heldout --seed 20261005` (the run reported in the
-CLEA 2026 camera-ready), 2026-10-05, Apple M4 Pro, presidio-analyzer 2.2.364,
-spaCy 3.8.16 small models:
+The pools cover the original 438 items. The precision regression cases also
+use fixed CITY and NAME_PLACE lists that are not part of either pool set, so
+measure held-out values with `--no-regression`:
+
+```bash
+PRESIDIO_LANGUAGES=en,es,fr,de,zh venv/bin/python -m bench.run \
+  --pools heldout --seed 20261005 --arms legacy fixed --no-regression
+```
+
+Five languages, `--pools heldout --seed 20261005 --no-regression`, 2026-11-04,
+presidio-analyzer 2.2.366, spaCy 3.8.18 small models, with the V2.14/V2.18
+fixes:
 
 | Arm | leakage | high-sensitivity | over-redaction |
 |---|---|---|---|
 | `legacy` | 49.8% (314/630) | 89.1% (294/330) | 0.0% |
-| `fixed` | 11.9% (75/630) | **18.2% (60/330)** | 0.0% |
+| `fixed` | 12.1% (76/630) | **18.5% (61/330)** | 0.0% |
 
-With the default seed the same pools give `fixed` 11.3% / 17.0% (56/330): the
-seed changes which value lands in which template, not the values.
+The same run before V2.14/V2.18 (2026-10-05, presidio-analyzer 2.2.364,
+spaCy 3.8.16) gave `fixed` 11.9% (75/630) and 18.2% (60/330). With the default
+seed the held-out pools give `fixed` 11.4% / 17.3%: the seed changes which
+value lands in which template, not the values. On the default pools `fixed`
+is 7.1% / 8.5% (45/630, 28/330).
 
-The gap to the published run (high-sensitivity leakage 10.6%) is almost
-entirely Chinese `PERSON`: 3 of 43 unseen Chinese names are caught, against
-88% or better for every other language. The published Chinese figure reflects
-the five names in that corpus rather than the model.
+The gap between the default and held-out pools is almost entirely Chinese
+`PERSON`: 3 of 43 unseen Chinese names are caught, against 85% or better for
+every other language (en 85%, es 88%, de 98%, fr 100%). The Chinese figure on
+the default pools reflects the five names in those pools rather than the
+model.
 
 ## Known residual gaps
 
@@ -196,7 +209,7 @@ These are measured, not hypothetical, and none is fixed:
   context words that some templates do not supply.
 - **IBAN — 8.3%.**
 
-The obfuscated and partial numbers match the published failure profile for
+The obfuscated and partial numbers match the failure profile reported for
 pattern-plus-NER detectors (REDACT, arXiv:2606.19881, reports 0.07 and 0.02
 recall respectively for Presidio). Closing them needs a different class of
 detector — an LLM pass or a purpose-built encoder — not a better regex.
