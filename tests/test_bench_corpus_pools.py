@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2024 GovernsAI. All rights reserved.
-"""The held-out benchmark pools must be disjoint from the published ones and
+"""The held-out benchmark pools must be disjoint from the default ones and
 carry valid checksums, so a ``--pools heldout`` run measures unseen values
 rather than a reshuffle of the same ones.
 
@@ -31,9 +31,9 @@ def _iban_ok(iban: str) -> bool:
 
 
 @pytest.fixture(autouse=True)
-def _restore_published_pools():
+def _restore_default_pools():
     yield
-    corpus.select_pools("published")
+    corpus.select_pools("default")
 
 
 def _slot_values(items):
@@ -43,33 +43,29 @@ def _slot_values(items):
 def test_heldout_pools_cover_every_field():
     assert set(corpus.HELDOUT_POOLS) == set(corpus.POOL_FIELDS)
     for name in corpus.POOL_FIELDS:
-        published, heldout = corpus.PUBLISHED_POOLS[name], corpus.HELDOUT_POOLS[name]
-        assert type(published) is type(heldout)
-        if isinstance(published, dict):
-            assert set(published) == set(heldout)
-            for lang in published:
-                assert len(published[lang]) == len(heldout[lang])
+        base, heldout = corpus.DEFAULT_POOLS[name], corpus.HELDOUT_POOLS[name]
+        assert type(base) is type(heldout)
+        if isinstance(base, dict):
+            assert set(base) == set(heldout)
+            for lang in base:
+                assert len(base[lang]) == len(heldout[lang])
         else:
-            assert len(published) == len(heldout)
+            assert len(base) == len(heldout)
 
 
 def test_heldout_slot_values_are_unseen():
-    published = _slot_values(corpus.build(pools="published", regression=False))
+    base = _slot_values(corpus.build(pools="default", regression=False))
     heldout = _slot_values(corpus.build(pools="heldout", regression=False))
     inline = {v for truths in corpus.INLINE_TRUTH.values() for v, _ in truths}
-    assert (published & heldout) - inline == set()
+    assert (base & heldout) - inline == set()
 
 
 def test_heldout_corpus_has_same_shape():
-    published = corpus.build(pools="published", regression=False)
+    base = corpus.build(pools="default", regression=False)
     heldout = corpus.build(pools="heldout", regression=False)
-    assert len(heldout) == len(published) == 438
-    assert (
-        sum(len(i.spans) for i in heldout)
-        == sum(len(i.spans) for i in published)
-        == 630
-    )
-    assert [i.tier for i in heldout] == [i.tier for i in published]
+    assert len(heldout) == len(base) == 438
+    assert sum(len(i.spans) for i in heldout) == sum(len(i.spans) for i in base) == 630
+    assert [i.tier for i in heldout] == [i.tier for i in base]
 
 
 def test_heldout_checksums_are_valid():
@@ -87,5 +83,5 @@ def test_select_pools_rejects_unknown_and_restores():
         corpus.select_pools("nope")
     corpus.select_pools("heldout")
     assert corpus.PERSONS is corpus.HELDOUT_POOLS["PERSONS"]
-    corpus.select_pools("published")
-    assert corpus.PERSONS is corpus.PUBLISHED_POOLS["PERSONS"]
+    corpus.select_pools("default")
+    assert corpus.PERSONS is corpus.DEFAULT_POOLS["PERSONS"]

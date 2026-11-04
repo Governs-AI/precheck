@@ -179,9 +179,9 @@ CVVS = ["CVV: 831"]
 EXPIRIES = ["exp: 04/28"]
 
 # ---------------------------------------------------------------------------
-# Value pools.  The constants above are the *published* pools (the corpus the
+# Value pools.  The constants above are the default pools (the corpus the
 # 2026-08-11 fixes were tuned against).  ``HELDOUT_POOLS`` holds a second set of
-# values for every slot that shares no value with the published set, so a run
+# values for every slot that shares no value with the default set, so a run
 # with ``--pools heldout`` measures the deployed path on values the fixes never
 # saw.  Templates and the inline partial/obfuscated tiers are unchanged.  Card
 # numbers are Luhn-valid, IBANs pass mod-97, NPI/DEA carry valid check digits.
@@ -297,9 +297,9 @@ HELDOUT_POOLS: Dict[str, Any] = {
     "EXPIRIES": ["exp: 11/29"],
 }
 
-PUBLISHED_POOLS: Dict[str, Any] = {name: globals()[name] for name in POOL_FIELDS}
+DEFAULT_POOLS: Dict[str, Any] = {name: globals()[name] for name in POOL_FIELDS}
 POOLS: Dict[str, Dict[str, Any]] = {
-    "published": PUBLISHED_POOLS,
+    "default": DEFAULT_POOLS,
     "heldout": HELDOUT_POOLS,
 }
 
@@ -804,13 +804,13 @@ def build(
     per_template: int = 6,
     languages: Optional[Iterable[str]] = None,
     regression: bool = True,
-    pools: str = "published",
+    pools: str = "default",
     seed: Optional[int] = None,
 ) -> List[Item]:
     """Generate the corpus. Deterministic for a fixed seed and pool set.
 
-    ``pools="heldout"`` renders the same templates with values the published
-    corpus never contains; ``seed`` defaults to ``SEED``.
+    ``pools="heldout"`` renders the same templates with values the default
+    pools never contain; ``seed`` defaults to ``SEED``.
     """
     select_pools(pools)
     rng = random.Random(SEED if seed is None else seed)

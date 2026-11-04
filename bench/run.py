@@ -358,9 +358,9 @@ def main() -> int:
     ap.add_argument("--per-template", type=int, default=6)
     ap.add_argument(
         "--pools",
-        choices=("published", "heldout"),
-        default="published",
-        help="value pools: the published corpus, or held-out values the fixes never saw",
+        choices=("default", "heldout"),
+        default="default",
+        help="value pools: the default pools, or held-out values the fixes never saw",
     )
     ap.add_argument(
         "--seed", type=int, default=None, help="corpus seed (default: corpus.SEED)"
