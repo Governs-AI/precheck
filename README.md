@@ -120,6 +120,7 @@ The service can be configured via environment variables:
 | `PII_TOKEN_SALT` | `dev-pii-token-salt-change-in-production` | PII tokenization salt |
 | `KEY_HMAC_SECRET` | `dev-key-hmac-secret-change-in-production` | API-key hashing secret |
 | `PRECHECK_DLQ`   | `/tmp/precheck.dlq.jsonl` | Dead letter queue file path      |
+| `POLICY_STORE_FAIL_MODE` | `redact` | Policy store unreachable and no cached org policy: `redact` PII under a built-in policy, or `deny`. The request's `policy_config` is never used instead |
 
 ## PII Detection
 

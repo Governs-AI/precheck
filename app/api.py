@@ -33,7 +33,11 @@ from .metrics import (
     set_service_info,
 )
 from .models import DecisionResponse, PrePostCheckRequest
-from .policies import evaluate, evaluate_with_payload_policy
+from .policies import (
+    STORE_UNAVAILABLE_REASON,
+    evaluate,
+    evaluate_with_payload_policy,
+)
 from .settings import settings
 from .storage import APIKey, get_db
 
@@ -52,7 +56,9 @@ def _policy_revision(req: PrePostCheckRequest, org_id: Optional[str]) -> str:
 
     The org's dashboard policy wins over a payload policy (ADR-005), so its
     revision (id + updatedAt) is what must invalidate cached allows. The
-    lookup is served from policy_source's in-process cache.
+    lookup is served from policy_source's in-process cache. When the store
+    is unreachable the evaluator ignores the payload policy, so the key must
+    not claim it either.
     """
     if org_id:
         from .policy_source import get_active_policy
@@ -60,7 +66,7 @@ def _policy_revision(req: PrePostCheckRequest, org_id: Optional[str]) -> str:
         try:
             org_policy = get_active_policy(org_id)
         except Exception:
-            org_policy = None
+            return "store-unavailable"
         if org_policy:
             return f"org:{org_policy.get('_revision') or org_policy.get('_policy_id')}"
     if req.policy_config:
@@ -85,8 +91,10 @@ def _build_allow_cache_key(req: PrePostCheckRequest, org_id: Optional[str]) -> s
 
 
 def _is_cacheable_allow_result(req: PrePostCheckRequest, result: dict) -> bool:
+    # Fail-closed decisions are not cached: they must not outlive the outage.
     return (
         req.budget_context is None
+        and STORE_UNAVAILABLE_REASON not in (result.get("reasons") or [])
         and result.get("decision") == "allow"
         and result.get("budget_status") is None
         and result.get("budget_info") is None

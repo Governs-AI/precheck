@@ -18,6 +18,9 @@ _MIN_SECRET_LENGTH = 32
 # - "local":  per-replica in-memory fallback. Intended for single-replica dev.
 _RATE_LIMIT_FAIL_MODES = {"closed", "open", "local"}
 
+# Allowed values for POLICY_STORE_FAIL_MODE. See Settings.policy_store_fail_mode.
+_POLICY_STORE_FAIL_MODES = {"redact", "deny"}
+
 # Allowed values for PRESIDIO_LANGUAGE_MODE. See Settings.presidio_language_mode.
 _PRESIDIO_LANGUAGE_MODES = {"hint", "union"}
 
@@ -46,6 +49,14 @@ class Settings(BaseSettings):
     # bypass described in the Cipher review on precheck#31. Operators running
     # a single replica in development may set this to "local".
     rate_limit_fail_mode: str = "closed"
+
+    # Policy evaluation when the policy store (DB) is unreachable and the
+    # org's policy is not cached. The caller-supplied policy_config is never
+    # used in its place. See _POLICY_STORE_FAIL_MODES.
+    # - "redact": evaluate under a built-in policy that redacts detected PII
+    #             on every scope and denies code-execution tools.
+    # - "deny":   reject every such request.
+    policy_store_fail_mode: str = "redact"
 
     # Default per-minute limits. These are baselines used by the rate-limit
     # middleware when no policy override is supplied. Policy-driven overrides
@@ -125,6 +136,11 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"RATE_LIMIT_FAIL_MODE must be one of {sorted(_RATE_LIMIT_FAIL_MODES)}; "
                 f"got {self.rate_limit_fail_mode!r}."
+            )
+        if self.policy_store_fail_mode not in _POLICY_STORE_FAIL_MODES:
+            raise ValueError(
+                f"POLICY_STORE_FAIL_MODE must be one of {sorted(_POLICY_STORE_FAIL_MODES)}; "
+                f"got {self.policy_store_fail_mode!r}."
             )
         if self.presidio_language_mode not in _PRESIDIO_LANGUAGE_MODES:
             raise ValueError(

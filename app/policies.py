@@ -1587,6 +1587,28 @@ def _evaluate_policy(
     return _apply_strict_fallback(raw_text, now, None, None, None, None)
 
 
+STORE_UNAVAILABLE_REASON = "policy_store.unavailable"
+
+
+def store_unavailable_policy() -> Dict[str, Any]:
+    """Server-side policy for requests whose org policy cannot be read.
+
+    Every tool gets the same treatment (no tool_access exemptions), the
+    code-execution denylist applies, and the default action is
+    POLICY_STORE_FAIL_MODE: "redact" redacts detected PII on every scope,
+    "deny" rejects the request outright.
+    """
+    action = "deny" if settings.policy_store_fail_mode == "deny" else "redact"
+    return {
+        "version": "v1",
+        "defaults": {"ingress": {"action": action}, "egress": {"action": action}},
+        "tool_access": {},
+        "deny_tools": list(DEFAULT_DENY_TOOLS),
+        "allow_tools": [],
+        "on_error": "block",
+    }
+
+
 # NEW: Dynamic policy evaluation using payload-provided policies
 def evaluate_with_payload_policy(
     tool: str,
@@ -1608,24 +1630,32 @@ def evaluate_with_payload_policy(
 
     The org's own policy must win: a caller holding an API key could
     otherwise send a permissive `policy_config` and opt out of governance.
+    For the same reason, when the policy store cannot be read the request
+    is evaluated under a server-side fail-closed policy, never the payload.
     """
 
     org_policy = None
+    store_unavailable = False
     if org_id:
         try:
             from .policy_source import get_active_policy
 
             org_policy = get_active_policy(org_id)
-        except Exception as exc:  # never break the request path on a fetcher bug
-            org_policy = None
+        except Exception as exc:
+            # The org may well have a policy we cannot see; fail closed.
+            store_unavailable = True
             # Use module logger; import is local to avoid circular load risk.
             import logging as _logging
 
-            _logging.getLogger(__name__).warning(
-                "policy_source fetch failed for org=%s err=%s", org_id, exc
+            _logging.getLogger(__name__).error(
+                "policy store unavailable for org=%s, failing closed err=%s",
+                org_id,
+                exc,
             )
 
-    if org_policy:
+    if store_unavailable:
+        resolved_policy_config = store_unavailable_policy()
+    elif org_policy:
         resolved_policy_config = deepcopy(org_policy)
     elif policy_config:
         resolved_policy_config = deepcopy(policy_config)
@@ -1645,6 +1675,10 @@ def evaluate_with_payload_policy(
         user_id,
         budget_context,
     )
+    if store_unavailable:
+        result["reasons"] = [STORE_UNAVAILABLE_REASON] + list(
+            result.get("reasons") or []
+        )
     # Which dashboard policy decided (None for payload/YAML policies). Not
     # part of the HTTP response; the audit event uses it to link the
     # Decision row to the org's Policy.
