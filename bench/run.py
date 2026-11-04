@@ -6,6 +6,7 @@ Usage (from precheck/):
     venv/bin/python -m bench.run                 # all arms, all languages
     venv/bin/python -m bench.run --arms regex    # single arm
     venv/bin/python -m bench.run --json out.json # machine-readable report
+    venv/bin/python -m bench.run --pools heldout  # values the fixes never saw
 
 Metrics
 -------
@@ -355,6 +356,15 @@ def main() -> int:
     ap.add_argument("--arms", nargs="*", default=list(ARMS.keys()))
     ap.add_argument("--languages", nargs="*", default=None)
     ap.add_argument("--per-template", type=int, default=6)
+    ap.add_argument(
+        "--pools",
+        choices=("default", "heldout"),
+        default="default",
+        help="value pools: the default pools, or held-out values the fixes never saw",
+    )
+    ap.add_argument(
+        "--seed", type=int, default=None, help="corpus seed (default: corpus.SEED)"
+    )
     ap.add_argument("--json", dest="json_out", default=None)
     ap.add_argument(
         "--no-regression",
@@ -367,9 +377,12 @@ def main() -> int:
         per_template=args.per_template,
         languages=args.languages,
         regression=not args.no_regression,
+        pools=args.pools,
+        seed=args.seed,
     )
     print(
-        f"corpus: {len(items)} items, {sum(len(i.spans) for i in items)} annotated spans"
+        f"corpus ({args.pools} pools): {len(items)} items, "
+        f"{sum(len(i.spans) for i in items)} annotated spans"
     )
 
     results: Dict[str, Dict[str, object]] = {}
