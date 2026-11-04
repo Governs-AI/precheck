@@ -115,11 +115,14 @@ The service can be configured via environment variables:
 | `DB_URL` / `DATABASE_URL` | `sqlite:///./local.db` | Database connection URL |
 | `USE_PRESIDIO`   | `true`                    | Enable Presidio PII detection    |
 | `PRESIDIO_MODEL` | `en_core_web_sm`          | spaCy model for Presidio         |
+| `PRESIDIO_LANGUAGES` | `en` | Analyzer languages, comma-separated. See [Detection languages](#detection-languages) |
+| `PRESIDIO_LANGUAGE_MODE` | `hint` | `hint`: caller's language, else the first configured; `union`: every configured language |
 | `WEBHOOK_URL`    | `None`                    | Webhook URL for dashboard events |
 | `WEBHOOK_SECRET` | `dev-webhook-secret-change-in-production` | Outbound webhook HMAC key |
 | `PII_TOKEN_SALT` | `dev-pii-token-salt-change-in-production` | PII tokenization salt |
 | `KEY_HMAC_SECRET` | `dev-key-hmac-secret-change-in-production` | API-key hashing secret |
 | `PRECHECK_DLQ`   | `/tmp/precheck.dlq.jsonl` | Dead letter queue file path      |
+| `POLICY_STORE_FAIL_MODE` | `redact` | Policy store unreachable and no cached org policy: `redact` PII under a built-in policy, or `deny`. The request's `policy_config` is never used instead |
 
 ## PII Detection
 
@@ -136,6 +139,43 @@ The service uses Microsoft Presidio for advanced PII detection with the followin
 ### Fallback Mode
 
 If Presidio fails to initialize, the service falls back to regex-based detection for basic PII types (email, phone, credit card).
+
+### Detection languages
+
+The image ships spaCy models for English, Spanish, French, German and Chinese,
+but only English is loaded by default. With English only, text in other
+languages is analysed by the English model: it misses noticeably more PII
+and redacts words in clean text. If any traffic is not in English, enable
+the other models:
+
+```bash
+PRESIDIO_LANGUAGES=en,es,fr,de,zh
+```
+
+Callers pick the language per request with `tool_config.metadata.language`
+(`hint` mode). Each model is held in memory, so size the instance for the
+languages you enable (resident memory of one worker, approximate):
+
+| `PRESIDIO_LANGUAGES` | Memory  |
+| -------------------- | ------- |
+| `en`                 | ~170 MB |
+| `en,es`              | ~230 MB |
+| `en,es,fr,de`        | ~580 MB |
+| `en,es,fr,de,zh`     | ~1 GB   |
+
+English-only fits a 512 MB instance; all five languages need about 2 GB.
+English stays the default so small instances do not run out of memory at
+boot, but it is never silent. At startup the service logs the loaded
+languages and warns when:
+
+- `PRESIDIO_LANGUAGES` was left at its English-only default (set it
+  explicitly, even to `en`, to record the choice and clear the warning);
+- a configured language's model is not installed (that language is skipped);
+- Presidio failed to load and detection is regex-only.
+
+A request that hints a language that is not loaded is logged once per
+language. Outside the image, `make install-multilingual` downloads the
+non-English models.
 
 ## Webhook Events
 

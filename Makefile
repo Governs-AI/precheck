@@ -1,4 +1,4 @@
-.PHONY: install install-dev test load-test format lint type-check clean run docker-build docker-run
+.PHONY: install install-dev install-multilingual test load-test format lint type-check clean run docker-build docker-run
 
 # Install production dependencies
 install:
@@ -9,6 +9,13 @@ install:
 install-dev:
 	pip install -r requirements-dev.txt
 	python -m spacy download en_core_web_sm
+
+# Download the non-English spaCy models (for PRESIDIO_LANGUAGES=en,es,fr,de,zh)
+install-multilingual:
+	python -m spacy download es_core_news_sm
+	python -m spacy download fr_core_news_sm
+	python -m spacy download de_core_news_sm
+	python -m spacy download zh_core_web_sm
 
 # Run tests
 test:

@@ -24,7 +24,8 @@ RUN python -m spacy download en_core_web_sm && \
 
 # Multilingual models (GOV-585 / TASKS.md §3.5a).
 # These are pre-installed so the image is ready to serve non-English PII
-# detection once the NLP engine config is enabled per-org in 3.5b+.
+# detection. They are loaded only when PRESIDIO_LANGUAGES lists them
+# (default: en); all five need about 1 GB of memory. See README.
 # Kept as a separate layer so the English-only base is still cache-hot for
 # builds that don't touch multilingual code.
 RUN python -m spacy download es_core_news_sm && \

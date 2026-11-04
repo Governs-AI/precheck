@@ -1,5 +1,6 @@
 import hashlib
 import importlib.util
+import logging
 import os
 import re
 import time
@@ -23,6 +24,8 @@ from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 
 from .settings import settings
+
+logger = logging.getLogger(__name__)
 
 # Fallback regex patterns for when Presidio is not available
 EMAIL = re.compile(r"\b([A-Za-z0-9._%+-])[^@\s]*(@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\b")
@@ -147,6 +150,13 @@ PHONE_REGIONS_BY_LANGUAGE = {
 # rather than taking the whole service down.
 SUPPORTED_LANGUAGES: List[str] = ["en"]
 
+# Configured languages that could not be loaded, mapped to the reason.
+# Reported at startup by detection_warnings().
+SKIPPED_LANGUAGES: Dict[str, str] = {}
+
+# Hinted languages already reported as not loaded, so each is logged once.
+_unloaded_hints_reported: Set[str] = set()
+
 
 def _model_available(model_name: str) -> bool:
     return importlib.util.find_spec(model_name) is not None
@@ -156,19 +166,17 @@ def _resolve_language_models() -> List[Dict[str, str]]:
     """Build the {lang_code, model_name} list for the configured languages."""
     configured = settings.presidio_language_list()
     models: List[Dict[str, str]] = []
+    SKIPPED_LANGUAGES.clear()
     for lang in configured:
         if lang == "en":
             model_name = getattr(settings, "presidio_model", "en_core_web_sm")
         else:
             model_name = DEFAULT_SPACY_MODELS.get(lang)
         if not model_name:
-            print(f"Presidio: no spaCy model mapped for language {lang!r}; skipping")
+            SKIPPED_LANGUAGES[lang] = "no spaCy model is mapped for it"
             continue
         if not _model_available(model_name):
-            print(
-                f"Presidio: spaCy model {model_name!r} for language {lang!r} is not "
-                "installed; skipping that language"
-            )
+            SKIPPED_LANGUAGES[lang] = f"spaCy model {model_name} is not installed"
             continue
         models.append({"lang_code": lang, "model_name": model_name})
 
@@ -723,6 +731,47 @@ def init_presidio():
 # Initialize on import
 init_presidio()
 
+
+def detection_warnings() -> List[str]:
+    """Explain how PII detection is running below full coverage, if it is.
+
+    Logged once at startup so a reduced setup is never silent:
+      - Presidio unavailable: regex patterns only.
+      - A configured language whose model is missing: that language's text
+        is analysed by another language's model.
+      - English-only by default: the PRESIDIO_LANGUAGES default was not
+        changed, so non-English text is analysed with the English model,
+        which misses more PII and over-redacts clean text. Setting
+        PRESIDIO_LANGUAGES explicitly (even to "en") records the choice and
+        silences this one.
+    """
+    if not USE_PRESIDIO or ANALYZER is None:
+        return [
+            "PII detection is running on regex patterns only (Presidio is "
+            "disabled or failed to load); names, addresses and free-text PII "
+            "are not detected."
+        ]
+
+    warnings = [
+        f"PII detection for language {lang} is disabled: {reason}. Text in "
+        f"that language is analysed with the {SUPPORTED_LANGUAGES[0]} model."
+        for lang, reason in SKIPPED_LANGUAGES.items()
+    ]
+    if (
+        SUPPORTED_LANGUAGES == ["en"]
+        and not SKIPPED_LANGUAGES
+        and "presidio_languages" not in settings.model_fields_set
+    ):
+        warnings.append(
+            "PII detection is English-only (PRESIDIO_LANGUAGES defaults to en). "
+            "Non-English text is analysed with the English model, which misses "
+            "more PII and redacts clean text. Set PRESIDIO_LANGUAGES=en,es,fr,de,zh "
+            "to use every model in the image (about 1 GB of memory), or set "
+            "PRESIDIO_LANGUAGES=en to accept English-only detection."
+        )
+    return warnings
+
+
 ANONYMIZE_OPERATORS = {
     "DEFAULT": OperatorConfig(
         "mask", {"masking_char": "*", "chars_to_mask": 4, "from_end": True}
@@ -828,6 +877,20 @@ def _languages_to_analyze(language: Optional[str]) -> List[str]:
         code = language.strip().lower()
         if code in supported:
             return [code]
+        # Only known codes are reported: the hint is caller-supplied text.
+        if code in DEFAULT_SPACY_MODELS and code not in _unloaded_hints_reported:
+            _unloaded_hints_reported.add(code)
+            logger.warning(
+                "PII detection: requests hint language %s, which is not loaded "
+                "(PRESIDIO_LANGUAGES=%s); analysing them in %s",
+                code,
+                ",".join(supported),
+                (
+                    "all loaded languages"
+                    if getattr(settings, "presidio_language_mode", "hint") == "union"
+                    else supported[0]
+                ),
+            )
 
     mode = getattr(settings, "presidio_language_mode", "hint")
     if mode == "union":
@@ -1587,6 +1650,28 @@ def _evaluate_policy(
     return _apply_strict_fallback(raw_text, now, None, None, None, None)
 
 
+STORE_UNAVAILABLE_REASON = "policy_store.unavailable"
+
+
+def store_unavailable_policy() -> Dict[str, Any]:
+    """Server-side policy for requests whose org policy cannot be read.
+
+    Every tool gets the same treatment (no tool_access exemptions), the
+    code-execution denylist applies, and the default action is
+    POLICY_STORE_FAIL_MODE: "redact" redacts detected PII on every scope,
+    "deny" rejects the request outright.
+    """
+    action = "deny" if settings.policy_store_fail_mode == "deny" else "redact"
+    return {
+        "version": "v1",
+        "defaults": {"ingress": {"action": action}, "egress": {"action": action}},
+        "tool_access": {},
+        "deny_tools": list(DEFAULT_DENY_TOOLS),
+        "allow_tools": [],
+        "on_error": "block",
+    }
+
+
 # NEW: Dynamic policy evaluation using payload-provided policies
 def evaluate_with_payload_policy(
     tool: str,
@@ -1608,24 +1693,32 @@ def evaluate_with_payload_policy(
 
     The org's own policy must win: a caller holding an API key could
     otherwise send a permissive `policy_config` and opt out of governance.
+    For the same reason, when the policy store cannot be read the request
+    is evaluated under a server-side fail-closed policy, never the payload.
     """
 
     org_policy = None
+    store_unavailable = False
     if org_id:
         try:
             from .policy_source import get_active_policy
 
             org_policy = get_active_policy(org_id)
-        except Exception as exc:  # never break the request path on a fetcher bug
-            org_policy = None
+        except Exception as exc:
+            # The org may well have a policy we cannot see; fail closed.
+            store_unavailable = True
             # Use module logger; import is local to avoid circular load risk.
             import logging as _logging
 
-            _logging.getLogger(__name__).warning(
-                "policy_source fetch failed for org=%s err=%s", org_id, exc
+            _logging.getLogger(__name__).error(
+                "policy store unavailable for org=%s, failing closed err=%s",
+                org_id,
+                exc,
             )
 
-    if org_policy:
+    if store_unavailable:
+        resolved_policy_config = store_unavailable_policy()
+    elif org_policy:
         resolved_policy_config = deepcopy(org_policy)
     elif policy_config:
         resolved_policy_config = deepcopy(policy_config)
@@ -1645,6 +1738,10 @@ def evaluate_with_payload_policy(
         user_id,
         budget_context,
     )
+    if store_unavailable:
+        result["reasons"] = [STORE_UNAVAILABLE_REASON] + list(
+            result.get("reasons") or []
+        )
     # Which dashboard policy decided (None for payload/YAML policies). Not
     # part of the HTTP response; the audit event uses it to link the
     # Decision row to the org's Policy.
@@ -1684,64 +1781,42 @@ def _evaluate_dynamic_policy(
         explicitly_allowed = is_listed_tool(tool, policy_config.get("allow_tools"))
 
         # PRECEDENCE LEVEL 2: Tool-specific access rules
-        tool_access = policy_config.get("tool_access", {})
-
-        # Try exact match first
-        if tool in tool_access:
-            tool_policy = tool_access[tool]
-            tool_direction = tool_policy.get("direction")
-            # Support "both" direction or exact match
-            if tool_direction == direction or tool_direction == "both":
-                return _apply_tool_specific_policy_dynamic(
-                    tool,
-                    raw_text,
-                    now,
-                    tool_policy,
-                    user_id,
-                    tool_config,
-                    policy_config,
-                    budget_context,
-                )
-
-        # Try partial matching for MCP tools (e.g., "mcp.weather.current" matches "weather.current")
-        for policy_tool, tool_policy in tool_access.items():
-            if tool.endswith("." + policy_tool) or tool.endswith(policy_tool):
-                tool_direction = tool_policy.get("direction")
-                # Support "both" direction or exact match
-                if tool_direction == direction or tool_direction == "both":
-                    return _apply_tool_specific_policy_dynamic(
-                        tool,
-                        raw_text,
-                        now,
-                        tool_policy,
-                        user_id,
-                        tool_config,
-                        policy_config,
-                        budget_context,
-                    )
-
-        # PRECEDENCE LEVEL 3: Global defaults for this direction
-        defaults = policy_config.get("defaults", {})
-        direction_defaults = defaults.get(direction, {})
-        default_action = normalize_action(
-            (
-                direction_defaults.get("action")
-                if isinstance(direction_defaults, dict)
-                else None
-            ),
-            "redact",
+        tool_policy = _matching_tool_policy(
+            tool, direction, policy_config.get("tool_access", {})
         )
-        if explicitly_allowed and default_action in ("deny", "confirm"):
-            default_action = "redact"
-        return _apply_default_action_dynamic(
-            default_action,
-            raw_text,
-            now,
-            direction,
-            policy_config,
-            user_id,
-            tool_config,
-            budget_context,
+        if tool_policy is not None:
+            result = _apply_tool_specific_policy_dynamic(
+                tool, raw_text, now, tool_policy, tool_config, policy_config
+            )
+        else:
+            # PRECEDENCE LEVEL 3: Global defaults for this direction
+            defaults = policy_config.get("defaults", {})
+            direction_defaults = defaults.get(direction, {})
+            default_action = normalize_action(
+                (
+                    direction_defaults.get("action")
+                    if isinstance(direction_defaults, dict)
+                    else None
+                ),
+                "redact",
+            )
+            if explicitly_allowed and default_action in ("deny", "confirm"):
+                default_action = "redact"
+            result = _apply_default_action_dynamic(
+                default_action,
+                raw_text,
+                now,
+                direction,
+                policy_config,
+                user_id,
+                tool_config,
+                budget_context,
+            )
+
+        # The budget cap applies to every decision path, not just tools
+        # that happen to have their own rule.
+        return _enforce_budget(
+            result, raw_text, now, tool_config, policy_config, budget_context
         )
 
     except Exception as e:
@@ -1799,26 +1874,45 @@ def _evaluate_dynamic_policy(
             }
 
 
+def _matching_tool_policy(
+    tool: str, direction: str, tool_access: Dict
+) -> Optional[Dict]:
+    """Return the tool_access rule that applies to `tool` in `direction`.
+
+    An exact name wins; otherwise a suffix match lets MCP-prefixed names
+    (e.g. "mcp.weather.current") pick up a rule for "weather.current".
+    """
+
+    def applies(rule: Dict) -> bool:
+        return rule.get("direction") in (direction, "both")
+
+    if tool in tool_access and applies(tool_access[tool]):
+        return tool_access[tool]
+    for policy_tool, tool_policy in tool_access.items():
+        if tool.endswith("." + policy_tool) or tool.endswith(policy_tool):
+            if applies(tool_policy):
+                return tool_policy
+    return None
+
+
 def _apply_tool_specific_policy_dynamic(
     tool: str,
     raw_text: str,
     now: int,
     tool_policy: Dict,
-    user_id: Optional[str] = None,
     tool_config: Optional[Dict] = None,
     policy_config: Optional[Dict] = None,
-    budget_context: Optional[Dict] = None,
 ) -> Dict:
     """Apply a tool-specific rule.
 
     The rule's `action` decides the request:
       - block   → deny, whatever the text contains
-      - confirm → confirm (a budget overrun still denies)
+      - confirm → confirm
       - allow / redact / tokenize → how detected PII is treated, unless
         `allow_pii` overrides a type; a type set to block denies.
     With no PII detected, allow/redact/tokenize all allow the request.
+    Budget caps are applied afterwards by `_enforce_budget`.
     """
-    has_budget = bool(user_id and tool_config and policy_config and budget_context)
     action = normalize_action(tool_policy.get("action"), None)
 
     if action == "deny":
@@ -1831,38 +1925,13 @@ def _apply_tool_specific_policy_dynamic(
         }
 
     if action == "confirm":
-        # Budget overrides confirm
-        if has_budget:
-            budget_result = _check_budget_and_apply(
-                user_id,
-                tool,
-                raw_text,
-                tool_config,
-                policy_config,
-                budget_context,
-                now,
-            )
-            if budget_result:
-                return budget_result
-
-        result = {
+        return {
             "decision": "confirm",
             "raw_text_out": raw_text,
             "reasons": ["tool-specific.confirm"],
             "policy_id": "tool-access",
             "ts": now,
         }
-        if has_budget:
-            result = _add_budget_info_to_result(
-                result,
-                user_id,
-                tool,
-                raw_text,
-                tool_config,
-                policy_config,
-                budget_context,
-            )
-        return result
 
     findings = _detect_pii_findings(raw_text, tool_config, policy_config)
 
@@ -1895,35 +1964,12 @@ def _apply_tool_specific_policy_dynamic(
             "ts": now,
         }
 
-    # No PII found: allow - but check budget first if user_id provided
-    result = {
+    return {
         "decision": "allow",
         "raw_text_out": raw_text,
         "policy_id": "tool-access",
         "ts": now,
     }
-    if has_budget:
-        budget_result = _check_budget_and_apply(
-            user_id,
-            tool,
-            raw_text,
-            tool_config,
-            policy_config,
-            budget_context,
-            now,
-        )
-        if budget_result:
-            return budget_result
-        result = _add_budget_info_to_result(
-            result,
-            user_id,
-            tool,
-            raw_text,
-            tool_config,
-            policy_config,
-            budget_context,
-        )
-    return result
 
 
 def _detect_pii_findings(
@@ -2077,18 +2123,6 @@ def _apply_default_action_dynamic(
             "ts": now,
         }
     elif action == "confirm":
-        if user_id and tool_config and policy_config and budget_context:
-            budget_result = _check_budget_and_apply(
-                user_id,
-                policy_config.get("tool", ""),
-                raw_text,
-                tool_config,
-                policy_config,
-                budget_context,
-                now,
-            )
-            if budget_result and budget_result["decision"] == "deny":
-                return budget_result
         return {
             "decision": "confirm",
             "raw_text_out": raw_text,
@@ -2313,81 +2347,73 @@ def _apply_strict_fallback(
         }
 
 
-def _check_budget_and_apply(
-    user_id: str,
-    tool: str,
+def _enforce_budget(
+    result: Dict,
     raw_text: str,
-    tool_config: Dict,
+    now: int,
+    tool_config: Optional[Dict],
     policy_config: Dict,
     budget_context: Optional[Dict],
-    now: int,
-) -> Optional[Dict]:
-    """Check budget and apply budget-based decisions"""
+) -> Dict:
+    """Apply the budget cap to the decision a policy path produced.
 
-    try:
-        from .budget import (
-            check_budget_with_context,
-            estimate_request_cost,
-            get_purchase_amount,
-            update_budget_after_decision,
-        )
+    Runs after every path (tool rule, defaults, network redaction, strict
+    fallback), so a tool without its own rule cannot spend past the cap:
+      - projected spend over the cap → deny
+      - projected spend over 90% of the cap on a costed request → confirm
+      - otherwise the decision stands, with budget info attached
+    The policy's output text is kept, so a redaction is never undone.
+    A monthly_limit of 0 means no budget is configured.
+    """
+    if not budget_context or result.get("decision") == "deny":
+        return result
+    if (budget_context.get("monthly_limit") or 0.0) <= 0:
+        return result
 
-        # Only check budget if budget_context is provided
-        if not budget_context:
-            return None
+    from .budget import (
+        check_budget_with_context,
+        estimate_request_cost,
+        get_purchase_amount,
+    )
 
-        # Get model from policy config or tool config
-        model = policy_config.get("model", "gpt-4")
-        if tool_config and "metadata" in tool_config:
-            model = tool_config["metadata"].get("model", model)
+    metadata = (tool_config or {}).get("metadata") or {}
+    model = metadata.get("model", policy_config.get("model", "gpt-4"))
+    estimated_llm_cost = estimate_request_cost(raw_text, model)
+    estimated_purchase = get_purchase_amount(tool_config or {})
+    budget_status, budget_info = check_budget_with_context(
+        budget_context, estimated_llm_cost, estimated_purchase
+    )
+    raw_text_out = result.get("raw_text_out", raw_text)
 
-        # Estimate costs
-        estimated_llm_cost = estimate_request_cost(raw_text, model)
-        estimated_purchase = get_purchase_amount(tool_config)
+    if not budget_status.allowed:
+        return {
+            "decision": "deny",
+            "raw_text_out": raw_text_out,
+            "reasons": ["budget_exceeded"],
+            "policy_id": "budget-check",
+            "ts": now,
+            "budget_status": budget_status,
+            "budget_info": budget_info,
+        }
 
-        # Only check budget if there's a purchase amount or if LLM cost is significant
-        if estimated_purchase is None and estimated_llm_cost < 0.01:
-            # No significant cost - just add budget info without blocking
-            return None
+    # Near-cap warnings only fire on requests that carry a real cost, so a
+    # chat turn costing a fraction of a cent does not need confirming.
+    if estimated_purchase is None and estimated_llm_cost < 0.01:
+        return result
 
-        # Check budget using context from request
-        budget_status, budget_info = check_budget_with_context(
-            budget_context, estimated_llm_cost, estimated_purchase
-        )
-
-        # Determine decision based on budget
-        if not budget_status.allowed:
-            # Budget exceeded - deny the request
-            return {
-                "decision": "deny",
-                "raw_text_out": raw_text,
-                "reasons": ["budget_exceeded"],
-                "policy_id": "budget-check",
-                "ts": now,
-                "budget_status": budget_status,
-                "budget_info": budget_info,
-            }
-        elif budget_status.reason == "budget_warning":
-            # Budget warning - require confirmation
-            return {
-                "decision": "confirm",
-                "raw_text_out": raw_text,
-                "reasons": ["budget_warning"],
-                "policy_id": "budget-check",
-                "ts": now,
-                "budget_status": budget_status,
-                "budget_info": budget_info,
-            }
-        else:
-            # Budget OK - allow but include budget info
-            # Note: We don't return here, let the normal policy flow continue
-            # The budget info will be added to the final result
-            return None
-
-    except Exception as e:
-        # If budget checking fails, log error but don't block the request
-        print(f"Budget check failed: {e}")
-        return None
+    result = dict(result)
+    result["budget_status"] = budget_status
+    result["budget_info"] = budget_info
+    reasons = list(result.get("reasons") or [])
+    if budget_status.reason == "budget_warning":
+        if result.get("decision") != "confirm":
+            result["decision"] = "confirm"
+            result["policy_id"] = "budget-check"
+        reasons.append("budget_warning")
+    else:
+        reasons.append("budget_check_passed")
+    result["reasons"] = list(dict.fromkeys(reasons))
+    return result
 
 
 def _add_budget_info_to_result(
