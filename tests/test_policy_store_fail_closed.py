@@ -18,13 +18,17 @@ import pytest
 from app import policy_source
 from app.decision_cache import allow_decision_cache
 from app.key_utils import hash_api_key
-from app.policies import (
-    STORE_UNAVAILABLE_REASON,
-    evaluate_with_payload_policy,
-)
+from app.policies import evaluate_with_payload_policy
 from app.rate_limit import rate_limiter
 from app.settings import Settings, settings
 from app.storage import APIKey, DashboardPolicy
+
+try:
+    from app.policies import STORE_UNAVAILABLE_REASON
+except ImportError:
+    # Keep this module importable on trees that predate the reason constant
+    # so the invariant harness can reuse the store fixture there.
+    STORE_UNAVAILABLE_REASON = "policy_store.unavailable"
 
 ORG = "org-outage"
 CARD = "4111 1111 1111 1111"
