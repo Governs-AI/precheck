@@ -23,15 +23,23 @@ Store states
     S5  store down, cold cache, caller sends a permissive policy
     S6  store recovers after an outage and the invalidate route drops the cache
 
-Controls executed here: C1 budget cap, and I-S fail-closed.
-C2 PII, C3 deny list, C4 confirm, and C5 detector coverage are listed so the
-matrix shape is visible; they are skip or n/a in this slice.
+Controls executed here:
+    C1    budget cap
+    C2    raw card and email never appear verbatim in allow or transform output
+    C3    a denied tool stays deny, including when a caller policy tries to clear it
+    C4    confirm rule on P2
+    C5    non-English text is not silent when only English models are loaded
+    I-S   fail-closed store behavior
+P10 also checks that a repeat matches the first decision and that a cached
+allow does not survive a policy change.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -54,6 +62,9 @@ from tests.test_policy_store_fail_closed import PERMISSIVE
 # Kept as a literal so this module still imports where that constant is absent.
 OUTAGE_REASON = "policy_store.unavailable"
 EMAIL = "jane.doe@example.com"
+DENIED_TOOL = "bash.exec"
+PROBE_LANG = "fr"
+NON_ENGLISH_TEXT = "Veuillez résumer le compte rendu de la réunion de demain."
 CHECKOUT_TEXT = "Check out cart 77"
 REDACT_TEXT = "Check out cart 77 for jane.doe@example.com"
 CLEAN_TEXT = "Summarise the release notes."
@@ -140,8 +151,6 @@ def applicability(cell: Cell) -> Optional[Tuple[str, str]]:
             "fail-closed behavior applies when the store is unreachable; "
             "S1 and S2 keep the store healthy",
         )
-    if cell.control in {"C2", "C3", "C4", "C5"}:
-        return ("skip", "not executed in this slice")
     return None
 
 
@@ -318,6 +327,14 @@ def execute(
     try:
         if cell.control == "C1":
             return _run_c1(cell, test_client, db_session, store, api_key, monkeypatch)
+        if cell.control == "C2":
+            return _run_c2(cell, test_client, db_session, store, api_key, monkeypatch)
+        if cell.control == "C3":
+            return _run_c3(cell, test_client, db_session, store, api_key, monkeypatch)
+        if cell.control == "C4":
+            return _run_c4(cell, test_client, db_session, store, api_key, monkeypatch)
+        if cell.control == "C5":
+            return _run_c5(cell, test_client, db_session, store, api_key, monkeypatch)
         if cell.control == "I-S":
             return _run_is(cell, test_client, db_session, store, api_key, monkeypatch)
         status, note = applicability(cell)
@@ -816,3 +833,327 @@ def _run_is_s6(cell, spec, client, db_session, store, api_key) -> CellOutcome:
     if failures:
         return _outcome(cell, "fail", "{}; FAIL {}".format(note, "; ".join(failures)))
     return _outcome(cell, "pass", note)
+
+
+def _finish(cell: Cell, observed: List[str], failures: List[str]) -> CellOutcome:
+    note = "; ".join(item for item in observed if item)
+    if failures:
+        return _outcome(cell, "fail", "{}; FAIL {}".format(note, "; ".join(failures)))
+    return _outcome(cell, "pass", note)
+
+
+def _arm(cell, spec, client, db_session, store, api_key, monkeypatch) -> List[str]:
+    """Put the store in `cell.state` using the path policy. Returns setup notes."""
+    if cell.state == "S6":
+        _recover(cell, spec, db_session, store, client, api_key, spec.policy)
+        return []
+    _policy_id, notes = _prepare_org(cell, spec, db_session, store, monkeypatch)
+    return list(notes)
+
+
+def _with_denied_tool(policy: dict) -> dict:
+    document = deepcopy(policy)
+    tools = [str(item) for item in (document.get("deny_tools") or [])]
+    if DENIED_TOOL not in tools:
+        tools.append(DENIED_TOOL)
+    document["deny_tools"] = tools
+    return document
+
+
+def _caller_for_control(cell: Cell, spec: PathSpec, control: str):
+    """Caller policy for this cell.
+
+    S3 and S5 send the permissive caller policy, which clears deny_tools and
+    passes text through. S2 and S4 send the path policy, except P8, which
+    omits it so the static policy is what runs. A deny-list probe keeps the
+    denied tool on that path policy. S5 still sends the permissive policy so
+    a caller cannot clear the deny.
+    """
+    caller = _caller_for_budget(cell, spec)
+    if control == "C3" and caller is not None and cell.state in {"S2", "S4"}:
+        return _with_denied_tool(caller)
+    return caller
+
+
+def _request_kwargs(spec: PathSpec, *, tool: str, text: str, caller, tool_config=None):
+    return {
+        "route": spec.route,
+        "tool": tool,
+        "scope": spec.scope,
+        "text": text,
+        "policy_config": caller,
+        "tool_config": tool_config,
+    }
+
+
+def _replace_with_deny(db_session, spec: PathSpec, store) -> None:
+    """Install a higher-priority deny policy and make the store readable."""
+    from datetime import datetime
+
+    store["up"] = True
+    row = _row(
+        id=_policy_id_for(spec, "cache-change"),
+        org_id=STORE_ORG,
+        name="cache-change",
+        defaults={"ingress": {"action": "deny"}, "egress": {"action": "deny"}},
+        tool_access={},
+        deny_tools=[DENIED_TOOL],
+        priority=100,
+        updated_at=datetime(2026, 11, 5, 18, 0, 0),
+    )
+    db_session.add(row)
+    db_session.commit()
+
+
+def _p10_followup(cell, client, api_key, spec, db_session, store, first, post_kwargs):
+    """Repeat the probe, then change the policy and ask again.
+
+    Returns (notes, failures). Non-P10 cells are untouched.
+    """
+    if cell.path != "P10":
+        return [], []
+    notes = []
+    failures = []
+    status, body, cache = _post(client, api_key, **post_kwargs)
+    notes.append(
+        "repeat={} cache={}".format(
+            body.get("decision") if status == 200 else "http{}".format(status),
+            cache,
+        )
+    )
+    if status != 200:
+        failures.append("repeat http {}".format(status))
+    elif body.get("decision") != first.get("decision"):
+        failures.append(
+            "repeat decision {} differs from {}".format(
+                body.get("decision"), first.get("decision")
+            )
+        )
+    elif first.get("decision") == "allow" and cache != "HIT":
+        failures.append("repeat allow was not served from the allow cache")
+
+    _replace_with_deny(db_session, spec, store)
+    _invalidate(client)
+    changed_status, changed, changed_cache = _post(client, api_key, **post_kwargs)
+    notes.append(
+        "after_change={} cache={}".format(
+            (
+                changed.get("decision")
+                if changed_status == 200
+                else "http{}".format(changed_status)
+            ),
+            changed_cache,
+        )
+    )
+    if changed_status != 200:
+        failures.append("post-change http {}".format(changed_status))
+    elif changed_cache == "HIT":
+        failures.append("cached decision served after the policy change")
+    elif first.get("decision") == "allow" and changed.get("decision") == "allow":
+        failures.append("allow outlived the policy change")
+    return notes, failures
+
+
+def _run_c2(cell, client, db_session, store, api_key, monkeypatch) -> CellOutcome:
+    spec = _spec_for(cell)
+    _reset_runtime()
+    failures = _arm(cell, spec, client, db_session, store, api_key, monkeypatch)
+    caller = _caller_for_control(cell, spec, "C2")
+    post_kwargs = _request_kwargs(spec, tool=spec.tool, text=CARD_TEXT, caller=caller)
+    status, body, _cache = _post(client, api_key, **post_kwargs)
+    observed = ["detector={}".format(_detector())]
+    if status != 200:
+        observed.append("http{}".format(status))
+        failures.append("http {}".format(status))
+        return _finish(cell, observed, failures)
+    observed.append(_flags(body))
+    leak = _verbatim_leak(body)
+    if leak:
+        failures.append(leak)
+    extra, extra_fail = _p10_followup(
+        cell, client, api_key, spec, db_session, store, body, post_kwargs
+    )
+    observed.extend(extra)
+    failures.extend(extra_fail)
+    return _finish(cell, observed, failures)
+
+
+def _verbatim_leak(body: dict) -> Optional[str]:
+    """Raw card or email inside an allow or transform response."""
+    decision = body.get("decision")
+    if decision not in {"allow", "transform"}:
+        return None
+    rendered = json.dumps(body, default=str)
+    leaked = []
+    if CARD in rendered:
+        leaked.append("card")
+    if EMAIL in rendered:
+        leaked.append("email")
+    if not leaked:
+        return None
+    return "verbatim {} in {} output".format(" and ".join(leaked), decision)
+
+
+def _run_c3(cell, client, db_session, store, api_key, monkeypatch) -> CellOutcome:
+    spec = _spec_for(cell)
+    _reset_runtime()
+    failures = _arm(cell, spec, client, db_session, store, api_key, monkeypatch)
+    caller = _caller_for_control(cell, spec, "C3")
+    post_kwargs = _request_kwargs(spec, tool=DENIED_TOOL, text="ls", caller=caller)
+    status, body, _cache = _post(client, api_key, **post_kwargs)
+    observed = ["detector={}".format(_detector()), "tool={}".format(DENIED_TOOL)]
+    if status != 200:
+        observed.append("http{}".format(status))
+        failures.append("http {}".format(status))
+        return _finish(cell, observed, failures)
+    observed.append(_flags(body))
+    if body.get("decision") != "deny":
+        failures.append("decision {} is not deny".format(body.get("decision")))
+    extra, extra_fail = _p10_followup(
+        cell, client, api_key, spec, db_session, store, body, post_kwargs
+    )
+    observed.extend(extra)
+    failures.extend(extra_fail)
+    return _finish(cell, observed, failures)
+
+
+def _run_c4(cell, client, db_session, store, api_key, monkeypatch) -> CellOutcome:
+    spec = _spec_for(cell)
+    _reset_runtime()
+    failures = _arm(cell, spec, client, db_session, store, api_key, monkeypatch)
+    caller = _caller_for_control(cell, spec, "C4")
+    post_kwargs = _request_kwargs(
+        spec, tool=spec.tool, text=CHECKOUT_TEXT, caller=caller
+    )
+    status, body, _cache = _post(client, api_key, **post_kwargs)
+    observed = ["detector={}".format(_detector())]
+    if status != 200:
+        observed.append("http{}".format(status))
+        failures.append("http {}".format(status))
+        return _finish(cell, observed, failures)
+    decision = body.get("decision")
+    observed.append(_flags(body))
+    if cell.state in {"S4", "S5"}:
+        if decision not in {"confirm", "deny"}:
+            failures.append("decision {} is neither confirm nor deny".format(decision))
+    elif decision != "confirm":
+        failures.append("decision {} is not confirm".format(decision))
+    return _finish(cell, observed, failures)
+
+
+def _run_c5(cell, client, db_session, store, api_key, monkeypatch) -> CellOutcome:
+    spec = _spec_for(cell)
+    _reset_runtime()
+    failures = _arm(cell, spec, client, db_session, store, api_key, monkeypatch)
+    caller = _caller_for_control(cell, spec, "C5")
+    direction = "egress" if spec.route == POSTCHECK else "ingress"
+    tool_config = {
+        "tool_name": spec.tool,
+        "direction": direction,
+        "metadata": {"language": PROBE_LANG},
+    }
+    post_kwargs = _request_kwargs(
+        spec,
+        tool=spec.tool,
+        text=NON_ENGLISH_TEXT,
+        caller=caller,
+        tool_config=tool_config,
+    )
+    status, body, _cache = _post(client, api_key, **post_kwargs)
+    observed = ["detector={}".format(_detector()), "probe_lang={}".format(PROBE_LANG)]
+    if status != 200:
+        observed.append("http{}".format(status))
+        failures.append("http {}".format(status))
+        return _finish(cell, observed, failures)
+    observed.append(_flags(body))
+    if not _text_was_analyzed(body):
+        if failures:
+            return _finish(cell, observed, failures)
+        return _outcome(
+            cell,
+            "n/a",
+            "text was not analyzed; {}".format(_flags(body)),
+        )
+    warnings = _coverage_warnings()
+    http_hit = _http_carries_warning(client, body)
+    if warnings is None:
+        observed.append("detection_warnings=absent")
+    else:
+        observed.append("detection_warnings={}".format(len(warnings)))
+        if warnings:
+            observed.append("warning={}".format(warnings[0][:120]))
+    observed.append("http_warning={}".format(int(http_hit)))
+    if not _probe_is_outside_loaded_languages():
+        if failures:
+            return _finish(cell, observed, failures)
+        return _outcome(
+            cell,
+            "n/a",
+            "probe language {} is loaded; {}".format(PROBE_LANG, "; ".join(observed)),
+        )
+    if not warnings and not http_hit:
+        failures.append("silent: non-English text produced no detection warning")
+    extra, extra_fail = _p10_followup(
+        cell, client, api_key, spec, db_session, store, body, post_kwargs
+    )
+    observed.extend(extra)
+    failures.extend(extra_fail)
+    return _finish(cell, observed, failures)
+
+
+def _text_was_analyzed(body: dict) -> bool:
+    """False when the path returns before the detector runs."""
+    decision = body.get("decision")
+    policy_id = str(body.get("policy_id") or "")
+    reasons = [
+        str(item) for item in (body.get("reasons") or []) if str(item) != OUTAGE_REASON
+    ]
+    joined = " ".join(reasons)
+    if decision == "confirm":
+        return False
+    if policy_id == "defaults" and "pass_through" in joined:
+        return False
+    if policy_id == "defaults" and any(item.endswith(".tokenize") for item in reasons):
+        return False
+    if policy_id == "deny-exec":
+        return False
+    if decision == "deny" and "pii." not in joined and "redact" not in joined:
+        return False
+    return True
+
+
+def _coverage_warnings() -> Optional[List[str]]:
+    import app.policies as policies
+
+    fn = getattr(policies, "detection_warnings", None)
+    if fn is None:
+        return None
+    found = fn()
+    if not isinstance(found, list):
+        return [str(found)] if str(found).strip() else []
+    return [str(item) for item in found if str(item).strip()]
+
+
+def _probe_is_outside_loaded_languages() -> bool:
+    import app.policies as policies
+
+    if (
+        not getattr(policies, "USE_PRESIDIO", False)
+        or getattr(policies, "ANALYZER", None) is None
+    ):
+        return True
+    loaded = [
+        str(item).lower()
+        for item in (getattr(policies, "SUPPORTED_LANGUAGES", None) or [])
+    ]
+    return PROBE_LANG not in loaded
+
+
+def _http_carries_warning(client, body: dict) -> bool:
+    chunks = [json.dumps(body, default=str)]
+    for path in ("/api/v1/health", "/api/v1/ready"):
+        response = client.get(path)
+        chunks.append(response.text or "")
+    blob = "\n".join(chunks).lower()
+    markers = ("english-only", "regex patterns only", "language fr is disabled")
+    return any(marker in blob for marker in markers)

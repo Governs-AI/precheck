@@ -6,6 +6,7 @@ import pytest
 
 from tests.invariants.matrix import (
     active_cells,
+    applicability,
     execute,
     iter_cells,
     noted_cells,
@@ -33,6 +34,12 @@ def test_catalog_covers_every_path_state_and_control():
     assert variants == {"tool_allow", "tool_redact", "default_redact"}
     assert {cell.variant for cell in cells if cell.path != "P9"} == {None}
     assert len(active_cells()) + len(noted_cells()) == len(cells)
+    skipped = [
+        cell.id
+        for cell in cells
+        if applicability(cell) is not None and applicability(cell)[0] == "skip"
+    ]
+    assert skipped == []
 
 
 @pytest.mark.parametrize("cell_id", [cell.id for cell in noted_cells()])
@@ -62,5 +69,9 @@ def test_invariant_cell(
         api_key=org_api_key,
         monkeypatch=monkeypatch,
     )
+    if outcome.result == "n/a":
+        pytest.skip("N/A: " + outcome.note)
+    if outcome.result == "skip":
+        pytest.skip("SKIP: " + outcome.note)
     if outcome.result != "pass":
         pytest.fail(outcome.note)
