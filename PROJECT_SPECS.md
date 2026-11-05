@@ -1065,6 +1065,10 @@ CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "
 
 ## Testing
 
+### Invariant matrix
+
+`tests/invariants/` crosses entry paths P1–P10, policy-store states S1–S6, and controls C1–C5. The executed cells are the budget cap (C1) and fail-closed store behavior (I-S). PII, deny-list, confirm, and detector-coverage cells are present as skip or n/a rows. `pytest tests/invariants` runs the matrix against the working tree. `python scripts/run_invariant_matrix.py --commit <sha>` copies that harness onto a detached worktree of the commit, runs it there, and writes `tests/invariants/matrix_results.csv` (`cell_id, path, state, control, commit, result, note`). The commit is not modified.
+
 ### Example Test Cases
 
 #### Test 1: verify_identity tool
@@ -1176,6 +1180,7 @@ curl -X POST http://localhost:8080/api/v1/postcheck \
 ```
 
 ## Recent Changes Log
+- **2026-11-05**: **Decision-path invariant matrix.** Added `tests/invariants/` and `scripts/run_invariant_matrix.py`. The matrix crosses precheck and postcheck paths (including network scope, strict fallback, pass-through, tokenize, tool rules, and the allow-decision cache) with store states (healthy, no org policy, stale cache, store down, permissive caller policy, recovery after invalidate). This slice executes budget-cap and fail-closed checks and records the other controls as skip or n/a. Measured rows for the two pinned commits are in `tests/invariants/matrix_results.csv`.
 - **2026-10-25**: **Pin SQLAlchemy below 2.1.** SQLAlchemy 2.1 maps
   `postgresql://` to the psycopg 3 driver, but the image ships psycopg2, so a
   fresh image build crashed at import (`No module named 'psycopg'`) and the
@@ -1340,6 +1345,7 @@ curl -X POST http://localhost:8080/api/v1/postcheck \
 - **pytest**: Test framework
 - **pytest-asyncio**: Async test support
 - **httpx**: HTTP client for API testing
+- **Invariant matrix**: `pytest tests/invariants` and `scripts/run_invariant_matrix.py`
 
 ## License
 

@@ -36,7 +36,20 @@ OVERLAY_FILES = (
 CSV_FIELDS = ("cell_id", "path", "state", "control", "commit", "result", "note")
 
 
+def _test_env() -> None:
+    """Match tests/conftest.py so importing the harness does not reject secrets."""
+    os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
+    os.environ.setdefault("DEBUG", "true")
+    os.environ.setdefault("PII_TOKEN_SALT", "test-salt-for-ci-only")
+    os.environ.setdefault("WEBHOOK_SECRET", "test-webhook-secret-ci")
+    os.environ.setdefault("REDIS_URL", "")
+    os.environ.setdefault("WEBHOOK_BASE_URL", "")
+    os.environ.setdefault("WEBHOOK_CONN_KEY", "")
+    os.environ.setdefault("KEY_HMAC_SECRET", "test-hmac-secret-for-ci-only")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _test_env()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--commit",
