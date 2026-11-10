@@ -1,0 +1,21 @@
+measurement=detached worktree of the commit, harness overlaid from /workspace
+python=3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]
+
+commit=b19caba64baccbe0cc6e564912433e567a8d2c89
+command=/usr/bin/python3 -m pytest tests/invariants -o addopts=-q --tb=line -p no:cov -p no:cacheprovider
+worktree_removed_after_run=yes
+requirements_sha256=f28a375d9517989dc9ca19a526ecb8b83dedec77fa41a1976f980cb91cf7daa3
+pytest_exit=1
+cells=432
+detector=presidio
+
+commit=e4ed50ce0a10880bc103437b6008eb58f747a7e4
+command=/usr/bin/python3 -m pytest tests/invariants -o addopts=-q --tb=line -p no:cov -p no:cacheprovider
+worktree_removed_after_run=yes
+requirements_sha256=f28a375d9517989dc9ca19a526ecb8b83dedec77fa41a1976f980cb91cf7daa3
+pytest_exit=1
+cells=432
+detector=presidio
+
+rerun_without_code_change=matched the 864 csv rows exactly, including notes
+regex_mode=INVARIANT_FORCE_REGEX=1 on both commits; result column matched all 864 rows. Notes also differ where policy_id names the detector and where the French coverage probe is transformed by one detector and allowed by the other. The csv is the presidio run.
